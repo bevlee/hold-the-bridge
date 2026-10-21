@@ -20,6 +20,8 @@
     };
     return seed === undefined ? go() : seeded(seed, go);
   }
+  // Compare fingerprints only from a freshly loaded page: burst particles decay in the render loop, not in step(),
+  // and the lanes roll caps its flakes on their count, so earlier headless runs shift the random stream.
   function fingerprint(modeKey, pilot, steps, seed = 7) {
     run(modeKey, pilot, steps, seed);
     return [modeKey, Math.round(g.G.dist * 1000), g.G.kills, g.units.length, g.enemies.length, g.barrels.length, g.gates.length,

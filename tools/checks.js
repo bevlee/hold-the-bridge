@@ -89,5 +89,45 @@
     r.errors = window.sim ? window.sim.errors.length : 'n/a';
     return r;
   };
-  window.checks = { steps, fresh, lost, hold, calm, noFire, hazards };
+  const FACT = [0.25, 1 / 3, 0.5, 1, 2, 3, 4, 5];
+  const through = (n, d) => Math.max(0, d.op === 'x' ? Math.round(n * FACT[d.value]) : n + d.value);
+  function bestFrom(n, rows) {
+    let best = 0;
+    for (let m = 0; m < 1 << rows.length; m++) { let v = n; for (let i = 0; i < rows.length && v > 0; i++) v = through(v, rows[i][(m >> i) & 1]); best = Math.max(best, v); }
+    return best;
+  }
+  // style: 'best' plans ahead over the remaining rows, 'face' takes whichever door shows the bigger number
+  const gauntletPilot = style => g => {
+    const G = g.G, open = g.gates.filter(x => !x.done);
+    const rows = [...new Set(open.map(x => x.rowId))].sort((a, b) => a - b);
+    const near = rows.length && open.filter(x => x.rowId === rows[0]);
+    if (near && near[0].z > -22) {
+      const idx = G.row - rows.length, n = G.reserve + g.units.length;
+      const face = d => (d.op === 'x' ? (FACT[d.value] >= 1 ? FACT[d.value] : -1 / FACT[d.value]) : d.value);
+      const score = d => (style === 'face' ? face(d) : bestFrom(through(n, d), G.plan.rows.slice(idx + 1)));
+      const pick = near.reduce((a, x) => (score(x) > score(a) ? x : a));
+      G.target = pick.z > -5 ? pick.cx : window.sim.avoid(g, pick.cx);
+    } else G.target = window.sim.avoid(g, G.target);
+  };
+  function gauntlet() {
+    const r = { plans: [] };
+    for (let L = 1; L <= 12; L++) {
+      localStorage.setItem('htb.gauntlet.level', L);
+      g.start('gauntlet');
+      const P = g.G.plan, traps = P.rows.filter(([a, b]) => a.op === 'x' && a.value === 2 && b.value < 0).length;
+      r.plans.push(`L${L} goal ${g.G.goal} best ${P.best} (${(P.best / g.G.goal * 100).toFixed(0)}%) face ${P.face} traps ${traps}`);
+    }
+    const play = (L, style) => {
+      localStorage.setItem('htb.gauntlet.level', L);
+      g.start('gauntlet');
+      steps(30000, () => gauntletPilot(style)(g));
+      return { L, style, over: g.G.over, why: g.G.endWhy, crew: g.G.reserve + g.units.length, goal: g.G.goal, title: document.getElementById('endTitle').textContent,
+        reason: document.getElementById('endReason').textContent, again: document.getElementById('againBtn').textContent, big: document.getElementById('againBtn').classList.contains('big'),
+        nextLevel: localStorage.getItem('htb.gauntlet.level'), secs: +(g.G.time / 2).toFixed(1) };
+    };
+    r.runs = [play(1, 'best'), play(1, 'face'), play(5, 'best'), play(5, 'face'), play(10, 'best'), play(10, 'face')];
+    r.errors = window.sim.errors.length;
+    return r;
+  }
+  window.checks = { steps, fresh, lost, hold, calm, noFire, hazards, gauntlet, gauntletPilot };
 })();
