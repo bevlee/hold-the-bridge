@@ -52,6 +52,7 @@
     steps(600, () => { for (const e of g.enemies) e.z = Math.min(e.z, -16 + 0.0); if (h.gone && shotAt === null) shotAt = g.units.length; });
     r.explosiveShotGone = h.gone; r.explosiveEnemiesKilled = e0 - g.enemies.length; r.explosiveCrewAtBlast = shotAt;
     fresh(); g.G.target = 0; steps(60);
+    noFire(); g.bullets.length = 0;  // shots already in flight would set it off before the crew walks in
     h = g.spawnHazard('explosive', 0, -6);
     r.explosiveTouchCrewLost = lost(() => steps(400, noFire));
 
