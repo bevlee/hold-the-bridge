@@ -283,3 +283,44 @@
   }
   Object.assign(window.checks, { clash, clashPilot });
 })();
+(() => {
+  const g = window.__game, { steps } = window.checks;
+  const FACT = [0.25, 1 / 3, 0.5, 1, 2, 3, 4, 5];
+  const gain = x => (x.op === 'x' ? FACT[x.value] : 1 + Math.max(-1, x.value) / 2);
+  // style 'aim': steer through the best doors, swing onto mobs that get close, fire the champion when ready; 'idle': hug the left wall
+  const cannonPilot = style => g => {
+    if (style === 'idle') { g.G.target = -5; return; }
+    const close = g.enemies.filter(e => e.z > -16);
+    if (close.length) { g.G.target = close.reduce((a, e) => a + e.x, 0) / close.length; }
+    else {
+      let best = 0, bv = -1;
+      for (let x = -4.5; x <= 4.5; x += 0.25) { let v = 1; for (const d of g.gates) if (x >= d.x0 && x < d.x1) v *= gain(d); if (v > bv) { bv = v; best = x; } }
+      g.G.target = best;
+    }
+    const btn = document.getElementById('champBtn');
+    if (!btn.hidden) btn.click();
+  };
+  function cannon() {
+    const r = { runs: [] };
+    for (const [L, seed, style] of [[1, 1, 'aim'], [1, 2, 'aim'], [2, 3, 'aim'], [1, 4, 'idle']]) window.sim.seeded(seed, () => {
+      localStorage.setItem('htb.cannon.level', L);
+      g.start('cannon');
+      let fired = 0, champs = 0, bullets = 0, hp0 = g.G.baseHp, firstHit = null, runnersSeen = 0; const seen = new WeakSet();
+      for (let i = 0; i < 60000 && !g.G.over; i++) {
+        cannonPilot(style)(g);
+        const t0 = g.G.fireT;
+        g.step(1);
+        if (g.G.fireT > t0) fired++;
+        for (const o of window.__game.props) if (o.used && !seen.has(o)) { seen.add(o); runnersSeen++; if (o.champ) champs++; }
+        if (firstHit === null && g.G.baseHp < hp0) firstHit = +(g.G.time / 2).toFixed(1);
+        bullets = Math.max(bullets, g.bullets.length);
+      }
+      r.runs.push({ L, seed, style, why: g.G.endWhy || (g.G.over ? 'overrun' : 'running'), secs: Math.round(g.G.time / 2), baseHp0: hp0, baseHp: g.G.baseHp, baseDmg: g.G.baseDmg,
+        cannonShots: fired, runnersSeen, runnersPerShot: +(g.G.baseDmg / Math.max(1, fired)).toFixed(2), champions: champs, firstBaseHitSec: firstHit, kills: g.G.kills, maxBullets: bullets,
+        title: document.getElementById('endTitle').textContent, again: document.getElementById('againBtn').textContent, nextLevel: localStorage.getItem('htb.cannon.level') });
+    });
+    r.errors = window.sim.errors.length;
+    return r;
+  }
+  Object.assign(window.checks, { cannon, cannonPilot });
+})();

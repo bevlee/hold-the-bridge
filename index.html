@@ -55,6 +55,7 @@ body {
   -webkit-text-stroke: 1.5px var(--ink); paint-order: stroke fill; text-shadow: 0 3px 0 var(--ink);
   animation: toast 1.4s ease-out forwards;
 }
+.champ { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(18px + env(safe-area-inset-bottom, 0px)); }
 .toast.big { font-size: clamp(38px, 10vw, 64px); -webkit-text-stroke-width: 2.5px; }
 @keyframes toast { 0% { transform: translateY(14px) scale(.8); opacity: 0 } 15% { transform: none; opacity: 1 } 70% { opacity: 1 } 100% { transform: translateY(-30px); opacity: 0 } }
 @media (prefers-reduced-motion: reduce) { .toast { animation-duration: 2s; animation-name: toastFade } @keyframes toastFade { 0%,80% { opacity: 1 } 100% { opacity: 0 } } }
@@ -98,6 +99,7 @@ button.go.big { grid-column: 1 / -1; font-size: 28px; padding-block: 18px; }
 </div>
 <div class="meter" id="meter" hidden><span id="meterLabel"></span><i><b id="meterFill"></b></i></div>
 <div id="toasts"></div>
+<button class="go alt champ" id="champBtn" hidden>Champion</button>
 
 <div class="modal" id="startModal">
   <div class="card">
@@ -334,7 +336,23 @@ const fortDecor = new THREE.Group();  // Hold the Wall: a low battlement right b
   fortDecor.visible = false;
   scene.add(fortDecor);
 }
-const DECOR = [laneDecor, fortDecor];
+const cannonDecor = new THREE.Group();  // Cannon Rush: the enemy base at the far end and the cannon the crew aims
+const CANNON_BASE_Z = -46;
+{
+  const red = new THREE.MeshLambertMaterial({ color: 0xb8323a }), dark = new THREE.MeshLambertMaterial({ color: 0x4a2a35 });
+  const keep = new THREE.Mesh(new THREE.BoxGeometry(HALF_W * 2 - 1, 3.4, 2.4), red); keep.position.set(0, 1.7, CANNON_BASE_Z - 1.4); cannonDecor.add(keep);
+  for (const x of [-3.6, 3.6]) { const t = new THREE.Mesh(new THREE.CylinderGeometry(1, 1.1, 5, 12), dark); t.position.set(x, 2.5, CANNON_BASE_Z - 1.4); cannonDecor.add(t); }
+  const gate = new THREE.Mesh(new THREE.BoxGeometry(2.4, 2.2, 0.2), dark); gate.position.set(0, 1.1, CANNON_BASE_Z - 0.15); cannonDecor.add(gate);
+  const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.32, 0.42, 1.6, 14), new THREE.MeshLambertMaterial({ color: 0x2a2e35 }));
+  barrel.rotation.x = Math.PI / 2 - 0.25; barrel.position.y = 0.75;
+  const wheels = new THREE.Mesh(new THREE.CylinderGeometry(0.42, 0.42, 1.3, 14), new THREE.MeshLambertMaterial({ color: 0x8a5a2b })); wheels.rotation.z = Math.PI / 2; wheels.position.set(0, 0.42, 0.3);
+  const cannon = new THREE.Group(); cannon.add(barrel, wheels); cannonDecor.add(cannon);
+  cannonDecor.userData.cannon = cannon;
+  shade(cannonDecor);
+  cannonDecor.visible = false;
+  scene.add(cannonDecor);
+}
+const DECOR = [laneDecor, fortDecor, cannonDecor];
 
 const snow = new THREE.Points(new THREE.BufferGeometry(), new THREE.PointsMaterial({ color: 0xffffff, size: 0.12, transparent: true, opacity: 0.85, depthWrite: false }));
 snow.geometry.setAttribute('position', new THREE.Float32BufferAttribute(Array.from({ length: 600 * 3 }, (_, i) => (i % 3 === 0 ? (Math.random() - 0.5) * 30 : i % 3 === 1 ? Math.random() * 14 : -60 + Math.random() * 72)), 3));
@@ -403,7 +421,7 @@ const barBgMat = new THREE.SpriteMaterial({ color: 0x1a1d22, depthTest: false })
 const barFgMat = new THREE.SpriteMaterial({ color: 0xff4040, depthTest: false });
 
 // ---------- state ----------
-let G, units, enemies, bullets, barrels, gates, pickups, dying, pads, hazards;
+let G, units, enemies, bullets, barrels, gates, pickups, dying, pads, hazards, props;  // props: mode-owned scene objects
 let running = false;
 const stats = {};
 const input = { left: false, right: false, dragging: false, startX: 0, startTarget: 0 };
@@ -423,18 +441,18 @@ function drawCrowdLabel(n) {
 }
 
 function resetGame(mode = 'classic') {
-  for (const list of [units, enemies, barrels, gates, pickups, dying, pads, hazards]) if (list) for (const o of list) removeObj(o);
+  for (const list of [units, enemies, barrels, gates, pickups, dying, pads, hazards, props]) if (list) for (const o of list) removeObj(o);
   G = { mode, dist: 0, time: 0, kills: 0, peak: 1, crowdX: 0, target: 0, crowdZ: 0, nextAt: 4, script: 0, cycle: 0, rowId: 0, over: false,
         upgradeRows: 0, bossDue: false, bosses: 0, rolls: 0, rollsBroken: 0, rollCooldown: 10,  // first roll shows up once the crew has had time to grow
         nextPad: 0, slots: [], compactT: 0, bossKills: 0, boostT: 0, reserve: 0, endWhy: null, endT: 0 };
   defenseLine.position.z = LINE_Z;
   const M = MODES[mode];
   for (const d of DECOR) d.visible = M.decor === d;
-  scene.background.set(M.theme.sky); scene.fog.color.set(M.theme.sky); deck.material.color.set(M.theme.deck);
+  scene.background.set(M.theme.sky); scene.fog.color.set(M.theme.sky); scene.fog.far = M.theme.fog || 60; deck.material.color.set(M.theme.deck);
   snow.visible = !!M.theme.snow;
   unitMat.color.set(0xffffff);
   Object.assign(stats, { multi: 1, size: 0, diag: 0, rate: 0, dmg: BASE_DMG, spike: 0, bomb: 0, ring: 0, star: 0, weapon: 0 });
-  units = []; enemies = []; bullets = []; barrels = []; gates = []; pickups = []; dying = []; pads = []; hazards = [];
+  units = []; enemies = []; bullets = []; barrels = []; gates = []; pickups = []; dying = []; pads = []; hazards = []; props = [];
   addUnits(1);
   M.setup();
   drawCrowdLabel(crewCount());
@@ -1557,6 +1575,7 @@ function spawnFinish() {
   group.position.z = SPAWN_Z;
   scene.add(group);
   G.finish = { group, z: SPAWN_Z };
+  props.push(G.finish);
 }
 function gauntletDirector(dt) {
   if (G.dist >= G.nextAt && G.row < GAUNTLET_ROWS) {
@@ -1712,6 +1731,7 @@ function spawnStairs() {
   group.position.z = SPAWN_Z;
   scene.add(group);
   G.stairs = { group, z: SPAWN_Z, step: 0, t: 0 };
+  props.push(G.stairs);
 }
 function clashDirector(dt) {
   G.brawlT = Math.max(0, G.brawlT - dt);
@@ -1736,6 +1756,95 @@ function clashDirector(dt) {
 }
 const clashKingLeft = () => { const k = hazards.find(h => h.king); return k ? k.count : 0; };
 
+// ---------- cannon rush: a cannon fires runners up the bridge through multiplying doors at an enemy base ----------
+// The crowd is a lone gunner at the cannon; runners live in props and never shoot.
+const CANNON_FIRE = 0.15 * SEC, RUN_SPEED = 5, MAX_RUNNERS = 320, CHARGE_FULL = 300, CHAMP_HITS = 20;
+const cannonBaseHp = L => 2000 + 1000 * (L - 1);
+const runnerMat = animeMaterial(0xffffff), champMat = animeMaterial(0x7fb2ff);
+function spawnRunner(x, z, used = [], champ = false) {
+  const mesh = new THREE.Mesh(champ ? modelGeometries.boss[0] : POSES[0], champ ? champMat : runnerMat);
+  if (champ) mesh.scale.setScalar(1.5);
+  mesh.position.set(x, 0, z);
+  mesh.castShadow = true;
+  scene.add(mesh);
+  const r = { mesh, x, z, used, champ, hp: champ ? CHAMP_HITS : 1, phase: Math.random() * 6 };
+  props.push(r);
+  return r;
+}
+const runners = () => props.filter(o => o.used);
+function killRunner(r) {
+  props.splice(props.indexOf(r), 1);
+  dieAnim(r.mesh, Math.random() < 0.5 ? -1 : 1);
+}
+// a runner that crosses a door it has not used yet takes its effect: + clones, x clones, - and / thin the runners
+function runThrough(r, g) {
+  r.used = [...r.used, g];
+  g.pulse = 0.3;
+  const clones = g.op === 'x' ? (FACTORS[g.value] >= 1 ? FACTORS[g.value] - 1 : 0) : Math.max(0, g.value);
+  if ((g.op === 'x' && Math.random() > FACTORS[g.value]) || (g.op === '+' && g.value < 0)) { killRunner(r); return; }
+  for (let i = 0; i < clones && props.length < MAX_RUNNERS; i++) spawnRunner(Math.max(g.x0 + 0.2, Math.min(g.x1 - 0.2, r.x + (Math.random() - 0.5) * 1.2)), r.z - Math.random() * 0.6, r.used);
+}
+function layoutCannon() {
+  const L = G.level, slideP = Math.min(0.8, 0.3 + 0.15 * (L - 1));
+  const pool = L > 1 ? [['x', FX.x2], ['x', FX.x3], ['+', 3], ['+', 5], ['+', 8], ['x', FX.half], ['+', -6]] : [['x', FX.x2], ['x', FX.x3], ['+', 3], ['+', 5], ['+', 8]];
+  const pick = () => pool[rint(0, pool.length - 1)];
+  for (const z of [-12, -22, -32]) {
+    const id = ++G.rowId;
+    if (Math.random() < slideP) { const w = 2.8, lim = HALF_W - w / 2, [op, v] = pool[rint(0, 1)]; spawnGate(0, z, v, id, op, { w, x: (Math.random() - 0.5) * 2 * lim, lo: -lim, hi: lim, v: pickSide() * (1.5 + Math.random()) }); }
+    else {  // never two bad doors in one row, or nothing would get through
+      const a = pick(), b = (a[0] === 'x' ? a[1] < FX.one : a[1] < 0) ? pool[rint(0, 4)] : pick();
+      [a, b].forEach(([op, v], k) => spawnGate(k ? 1 : -1, z, v, ++G.rowId, op));
+    }
+  }
+}
+function cannonUpdate(dt) {
+  const cannon = cannonDecor.userData.cannon;
+  cannon.position.set(G.crowdX, 0, 1.2);
+  if ((G.fireT -= dt) <= 0 && units.length) { G.fireT += CANNON_FIRE; if (props.length < MAX_RUNNERS) spawnRunner(G.crowdX, 0.4); }
+  if ((G.mobT -= dt) <= 0) {
+    G.mobT = 5 * SEC;
+    const n = 6 + 2 * ++G.mobs + 4 * (G.level - 1), cx = (Math.random() - 0.5) * 6;
+    for (let i = 0; i < n; i++) spawnEnemy(Math.max(-HALF_W + 0.4, Math.min(HALF_W - 0.4, cx + (Math.random() - 0.5) * 3)), CANNON_BASE_Z + 1 - Math.random() * 3, 1, false, true);
+  }
+  for (const r of runners()) {
+    const pz = r.z;
+    r.z -= RUN_SPEED * (r.champ ? 0.6 : 1) * dt;
+    r.phase += dt * 10;
+    if (!r.champ) {
+      r.mesh.geometry = poseFor(r.phase);
+      for (const g of gates) if (pz > g.z && r.z <= g.z && r.x >= g.x0 && r.x < g.x1 && !r.used.includes(g)) { runThrough(r, g); if (!props.includes(r)) break; }
+      if (!props.includes(r)) continue;
+    }
+    r.mesh.position.set(r.x, 0, r.z);
+    const reach = r.champ ? 1 : 0.42;
+    for (const e of enemies) {
+      if ((e.x - r.x) ** 2 + (e.z - r.z) ** 2 > reach * reach) continue;
+      killEnemy(e);
+      if (--r.hp <= 0) { killRunner(r); break; }
+    }
+    if (!props.includes(r)) continue;
+    if (r.z <= CANNON_BASE_Z) {
+      const dmg = r.champ ? CHAMP_HITS : 1;
+      G.baseHp = Math.max(0, G.baseHp - dmg); G.baseDmg += dmg;
+      if (!r.champ) G.charge = Math.min(CHARGE_FULL, G.charge + 1);
+      props.splice(props.indexOf(r), 1); scene.remove(r.mesh);
+      if (G.baseHp <= 0 && !G.endWhy) {
+        for (const x of [-3, 0, 3]) burst(x, CANNON_BASE_Z - 1, 0xb8323a);
+        save('htb.cannon.level', G.level + 1);
+        toast('Base destroyed!', '#ffc83d', true);
+        endRun('win', 1.5 * SEC);
+      }
+    }
+  }
+  $('champBtn').hidden = G.charge < CHARGE_FULL || !!G.endWhy;
+}
+function fireChampion() {
+  if (G.mode !== 'cannon' || G.charge < CHARGE_FULL || !running) return;
+  G.charge = 0;
+  spawnRunner(G.crowdX, 0, [], true);
+  toast('Champion!', '#7fb2ff');
+}
+
 // ---------- modes: each entry owns how its run differs from the shared engine ----------
 function classicDirector() {
   while (G.dist >= G.nextAt) { const ev = nextEvent(); runEvent(ev); G.nextAt += ev.gap; }
@@ -1756,6 +1865,8 @@ const MODE_BASE = {
   bossHp,
   onKill() {},
   hud: () => [`${Math.floor(G.dist)} m`, `${G.kills} down`],
+  crewHud: () => [crewCount(), mode().shooting ? `Crew · ${weapon().name}` : 'Crew'],
+  crowdTag: true,
   score: () => ({ n: Math.floor(G.dist), text: String(Math.floor(G.dist)), label: 'Metres' }),
   endStats: s => [[s.text, s.label], [G.kills, 'Enemies'], [G.peak, 'Peak crew']],
   endText: why => END[why],
@@ -1768,6 +1879,7 @@ const MODE_BASE = {
   theme: { sky: SKY, deck: 0x7885a6 },
   decor: null,
   shooting: true,
+  cover: true,  // enemies wait behind rows that block shots
   march: 0,  // how fast enemies walk on their own when the deck holds still
   breach: () => true,  // an enemy crossed the red line; true ends the run
 };
@@ -1837,6 +1949,32 @@ const MODES = {
     endStats: s => [[s.text, s.label], [G.stairs ? `×${stairMult(G.stairs.step)}` : '-', 'Stairs'], [G.peak, 'Peak crew']],
     endText: why => (why === 'win' ? ['Castle taken', `${crewCount()} crew left standing.`]
       : clashKingLeft() ? ['The King holds', `${clashKingLeft()} of his guard still stand.`] : END[why]),
+  },
+  cannon: {
+    label: 'Cannon Rush',
+    decor: cannonDecor,
+    shooting: false,
+    cover: false,
+    march: 1.4,
+    setup() {
+      G.level = load('htb.cannon.level') || 1;
+      G.baseHp = G.baseMax = cannonBaseHp(G.level); G.baseDmg = 0; G.charge = 0; G.fireT = 0; G.mobT = 3 * SEC; G.mobs = 0;
+      layoutCannon();
+      toast(`Level ${G.level} · aim the cannon`, '#ffc83d');
+    },
+    scroll: () => 0,
+    progress: () => 0,
+    director() {},
+    update: cannonUpdate,
+    meter: () => ({ label: `Base ${G.baseHp} · champion ${Math.floor(G.charge / CHARGE_FULL * 100)}%`, frac: G.baseHp / G.baseMax, color: '#e8343b' }),
+    hud: () => [`Level ${G.level}`, `${G.kills} mob down`],
+    crewHud: () => [runners().length, 'Runners'],
+    crowdTag: false,
+    theme: { sky: SKY, deck: 0x7885a6, fog: 95 },
+    score: () => (G.endWhy === 'win' ? { n: 1e6 + G.level, text: String(G.level), label: 'Level won' } : { n: G.baseDmg, text: String(G.baseDmg), label: 'Base damage' }),
+    endStats: s => [[s.text, s.label], [G.kills, 'Mob down'], [`${G.baseHp}`, 'Base HP left']],
+    endText: why => (why === 'win' ? ['Base destroyed', `Level ${G.level} cleared.`] : ['Cannon overrun', 'An enemy mob reached the cannon.']),
+    again: why => (why === 'win' ? ['Next level', false] : ['Retry', true]),
   },
   gauntlet: {
     label: 'Door Gauntlet',
@@ -1916,7 +2054,7 @@ function update(dt) {
     if (e.z > -22 && n) e.x += Math.max(-1, Math.min(1, G.crowdX - e.x)) * e.steer * dt;
     const ex = M.walledLanes && e.z < LANE_WALL_END ? LANE_EDGE - LANE_WALL_T - e.r : HALF_W - 0.35;  // walled middle lane
     e.x = Math.max(-ex, Math.min(ex, e.x));
-    holdBehindCover(e, pz);
+    if (M.cover) holdBehindCover(e, pz);
     e.phase += dt * (7 + e.walk * 3);
     e.hitT = Math.max(0, e.hitT - dt);
     e.mesh.geometry = poseFor(e.phase, e.boss ? 'boss' : 'enemy');
@@ -2133,7 +2271,7 @@ function animate(dt) {
   lineMat.color.setRGB(1, 0.16 + 0.5 * near * (0.5 + 0.5 * Math.sin(performance.now() / 80)), 0.16);
 
   // crowd label + camera
-  if (units && units.length) {
+  if (units && units.length && mode().crowdTag) {
     crowdSprite.visible = true;
     crowdSprite.position.set(G.crowdX, 2.3, G.crowdZ - 0.2);
     if (crowdSprite.userData.n !== crewCount()) { crowdSprite.userData.n = crewCount(); drawCrowdLabel(crewCount()); }
@@ -2156,16 +2294,16 @@ function toast(text, color, big = false) {
 }
 let lastHud = '';
 function hud() {
-  const [big, small] = mode().hud(), m = mode().meter();
-  const s = `${crewCount()}|${big}|${small}|${stats.weapon}|${m ? `${m.label}|${Math.round(m.frac * 100)}|${m.color}` : ''}`;
+  const [big, small] = mode().hud(), [lead, sub] = mode().crewHud(), m = mode().meter();
+  const s = `${lead}|${sub}|${big}|${small}|${m ? `${m.label}|${Math.round(m.frac * 100)}|${m.color}` : ''}`;
   if (s === lastHud) return;
   lastHud = s;
   $('meter').hidden = !m;
   if (m) { $('meterLabel').textContent = m.label; $('meterFill').style.width = `${Math.max(0, Math.min(1, m.frac)) * 100}%`; $('meterFill').style.background = m.color; }
-  $('hudUnits').textContent = crewCount();
+  $('hudUnits').textContent = lead;
   $('hudDist').textContent = big;
   $('hudKills').textContent = small;
-  $('hudWeapon').textContent = mode().shooting ? `Crew · ${weapon().name}` : 'Crew';
+  $('hudWeapon').textContent = sub;
 }
 
 function gameOver(why) {
@@ -2184,7 +2322,7 @@ function gameOver(why) {
   if (s.n > (readBest(G.mode)?.n ?? -Infinity)) writeBest(G.mode, s);
   const shapes = SHAPE_KEYS.filter(k => stats[k] > 0).map(k => `${k} ${stats[k]}`);
   $('endBuild').textContent = `Build: ${weapon().name} · ${stats.multi} shot · ${stats.diag} diagonal · size ${stats.size} · rate ${stats.rate} · ${stats.dmg} dmg` + (shapes.length ? ` · ${shapes.join(' · ')}` : '');
-  $('hud').hidden = true; $('meter').hidden = true;
+  $('hud').hidden = true; $('meter').hidden = true; $('champBtn').hidden = true;
   $('endModal').hidden = false;
   $('againBtn').focus();
 }
@@ -2227,7 +2365,9 @@ canvas.addEventListener('pointermove', e => {
 const endDrag = () => { input.dragging = false; };
 canvas.addEventListener('pointerup', endDrag);
 canvas.addEventListener('pointercancel', endDrag);
+$('champBtn').addEventListener('click', () => fireChampion());
 window.addEventListener('keydown', e => {
+  if (e.key === ' ') fireChampion();
   if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') input.left = true;
   if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') input.right = true;
 });
@@ -2250,6 +2390,6 @@ function frame(now) {
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
-window.__game = { start, step(n, dt = 1 / 60) { for (let i = 0; i < n && running; i++) update(dt); }, addUnits: n => addUnits(n), spawnBoss, spawnEnemy, spawnHazard: (kind, ...a) => HAZARDS[kind].spawn(...a), hazardRow: (kind, z = SPAWN_Z) => HAZARDS[kind].row(z), get hazards() { return hazards; }, get G() { return G; }, stats, get units() { return units; }, get enemies() { return enemies; }, get bullets() { return bullets; }, get gates() { return gates; }, get barrels() { return barrels; }, get pickups() { return pickups; } };
+window.__game = { start, step(n, dt = 1 / 60) { for (let i = 0; i < n && running; i++) update(dt); }, addUnits: n => addUnits(n), spawnBoss, spawnEnemy, spawnHazard: (kind, ...a) => HAZARDS[kind].spawn(...a), hazardRow: (kind, z = SPAWN_Z) => HAZARDS[kind].row(z), get hazards() { return hazards; }, get G() { return G; }, stats, get units() { return units; }, get enemies() { return enemies; }, get bullets() { return bullets; }, get gates() { return gates; }, get barrels() { return barrels; }, get pickups() { return pickups; }, get props() { return props; } };
 })();
 </script>
