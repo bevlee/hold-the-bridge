@@ -1,0 +1,32 @@
+{
+  "crew": {
+    "vertices": 4024,
+    "triangles": 1824,
+    "walk_frames": 8
+  },
+  "enemy": {
+    "vertices": 2714,
+    "triangles": 1244,
+    "walk_frames": 8
+  },
+  "boss": {
+    "vertices": 3962,
+    "triangles": 1822,
+    "walk_frames": 8
+  },
+  "capsule": {
+    "vertices": 976,
+    "triangles": 488,
+    "walk_frames": 0
+  },
+  "crate": {
+    "vertices": 624,
+    "triangles": 308,
+    "walk_frames": 0
+  },
+  "pylon": {
+    "vertices": 480,
+    "triangles": 220,
+    "walk_frames": 0
+  }
+}

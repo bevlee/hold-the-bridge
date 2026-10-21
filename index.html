@@ -10,11 +10,11 @@
 <style>
 /* Layout: full-bleed WebGL bridge, thin HUD strips pinned to the top and bottom, modal cards for start / game over. Single daytime look. */
 :root {
-  --sky: #a9cfe4;
+  --sky: #c9c9ee;
   --ink: #12161d;
   --paper: #f5f7f9;
-  --panel: rgba(18, 23, 31, 0.78);
-  --good: #2f8cff;
+  --panel: rgba(32, 41, 66, 0.90);
+  --good: #43dcd0;
   --bad: #e8343b;
   --gold: #ffc83d;
   --muted: #9aa6b4;
@@ -63,9 +63,6 @@ body {
 .card h1 { margin: 0; font-family: var(--display); font-weight: 400; font-size: clamp(30px, 8vw, 44px); line-height: 1; text-wrap: balance; }
 .card h1 em { font-style: normal; color: var(--bad); }
 .card p { margin: 0; line-height: 1.45; color: #d7dde5; }
-.rules { margin: 0; padding: 0; list-style: none; display: grid; gap: 6px; font-size: 14px; color: #d7dde5; }
-.rules li { display: grid; grid-template-columns: 74px 1fr; gap: 10px; align-items: baseline; }
-.rules b { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--gold); }
 .endstats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
 .endstats div { display: grid; }
 .endstats b { font-family: var(--display); font-weight: 400; font-size: 24px; font-variant-numeric: tabular-nums; }
@@ -94,23 +91,10 @@ button.go.alt:active { box-shadow: 0 1px 0 #a37a12; }
 <div class="modal" id="startModal">
   <div class="card">
     <h1>Hold the <em>Bridge</em></h1>
-    <p>Your crew fires on its own. Steer them across the deck and keep every enemy from reaching the red line behind you.</p>
-    <ul class="rules">
-      <li><b>Move</b><span>Drag anywhere, or hold ← → / A D.</span></li>
-      <li><b>Gates</b><span>Walk through to gain or lose crew. Every 50 bullets that hit a gate add +1 (watch its bar fill).</span></li>
-      <li><b>Barrels</b><span>Shoot the number down to zero to drop its upgrade, then walk over the drop.</span></li>
-      <li><b>Contact</b><span>Barrels and enemies kill any crew member they touch.</span></li>
-      <li><b>Bounce</b><span>Shots bounce off the side walls at the angle they hit.</span></li>
-      <li><b>× ÷ gates</b><span>×3 multiplies your crew, ÷2 halves it. Every 100 bullets moves a multiplier gate one step up (÷2 → ×1 → ×2…).</span></li>
-      <li><b>Weapons</b><span>Green crates upgrade your gun: pistol → rifle → rocket → laser.</span></li>
-      <li><b>Hazards</b><span>Rolling tyres can't be destroyed, so dodge them. When a boss gets close it slams a red zone: step out of it.</span></li>
-      <li><b>Shapes</b><span>Spikes pierce, bombs splash, rings ricochet to the next enemy, stars split on impact. Owned shapes take turns in your volley.</span></li>
-    </ul>
     <div class="modes">
-      <button class="go" id="startClassic">Bridge run</button>
+      <button class="go" id="startClassic">Classic</button>
       <button class="go alt" id="startLanes">Three lanes</button>
     </div>
-    <p class="kbd">Three lanes: walled columns. A horde pours down the middle, +1 gates stream down the right, and a giant toilet roll on the left hides an upgrade under a big health pool. Every third roll calls an armored boss that only the Boss Breaker from the next roll can hurt.</p>
   </div>
 </div>
 
@@ -132,6 +116,7 @@ button.go.alt:active { box-shadow: 0 1px 0 #a37a12; }
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="assets/anime/models.js"></script>
 <script>
 (() => {
 // ---------- tuning ----------
@@ -159,7 +144,9 @@ const bulletSpeed = d => 7 + 15 * (1 - Math.exp(-d / 400));
 const enemyHp = d => d < 60 ? 1 : Math.round(1 + d / 45 + 10 * Math.pow(d / 350, 2));
 const crewBonus = d => 1 + Math.floor(d / 500);   // +crew barrels start at +1 and climb slowly
 const bossHp = k => Math.round(150 * Math.pow(k, 1.6));
-const rollHp = k => 80 + 70 * (k - 1);   // gentle climb so later rolls stay breakable
+// left-lane toilet rolls: each takes longer than the last, and the ninth (the last before boss 3) is a wall
+const ROLL_HP = [80, 150, 250, 400, 600, 850, 1200, 1700, 4000];
+const rollHp = k => ROLL_HP[Math.min(k, ROLL_HP.length) - 1] * (k > ROLL_HP.length ? 1.3 ** (k - ROLL_HP.length) : 1);
 const LANE_BOSS_HP = [800, 2000, 4500];  // three-lanes mode ends when the third boss falls
 const ROLL_DMG_SCALE = 0.15;             // shots do 15% of their damage to toilet rolls
 const HORDE_FIRST_Z = -34;               // the horde is already on screen when the run starts
@@ -207,7 +194,8 @@ renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 stage.appendChild(renderer.domElement);
 
-const SKY = 0xa9cfe4;
+const SKY = 0xc9c9ee;
+renderer.outputEncoding = THREE.sRGBEncoding;
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(SKY);
 scene.fog = new THREE.Fog(SKY, 30, 60);
@@ -239,23 +227,53 @@ function resize() {
 window.addEventListener('resize', resize);
 resize();
 
+// ---------- Blender-authored anime kit: shared vertex-colored meshes ----------
+const modelGeometries = {};
+for (const [name, data] of Object.entries(window.ANIME_MODELS)) {
+  const base = new THREE.BufferGeometry();
+  base.setAttribute('position', new THREE.Float32BufferAttribute(data.position, 3));
+  base.setAttribute('normal', new THREE.Float32BufferAttribute(data.normal, 3));
+  base.setAttribute('color', new THREE.Float32BufferAttribute(data.color, 3));
+  base.setIndex(data.index);
+  base.computeBoundingSphere();
+  modelGeometries[name] = data.frames ? data.frames.map(positions => {
+    const pose = new THREE.BufferGeometry();
+    pose.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    pose.setAttribute('normal', base.attributes.normal);
+    pose.setAttribute('color', base.attributes.color);
+    pose.setIndex(base.index);
+    pose.computeBoundingSphere();
+    return pose;
+  }) : base;
+}
+// Release the serialized arrays after uploading the reusable geometry.
+delete window.ANIME_MODELS;
+const POSES = modelGeometries.crew;
+const poseFor = (ph, kind = 'crew') => modelGeometries[kind][Math.floor(((ph % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2) / (Math.PI * 2) * 8) % 8];
+const animeMaterial = color => new THREE.MeshToonMaterial({ vertexColors: true, color });
+const unitMat = animeMaterial(0xffffff);
+const tierMats = TIERS.map((_, i) => animeMaterial(new THREE.Color().setHSL(.96 - i * .035, .09 + i * .025, .95 - i * .025)));
+const propMat = animeMaterial(0xffffff);
+const sealedPropMat = animeMaterial(0x667088);
+const tierOf = hp => TIERS.findIndex(t => hp <= t.max);
+
 // ---------- scenery ----------
 const deckLen = 200;
-const deck = new THREE.Mesh(new THREE.BoxGeometry(HALF_W * 2 + 1.2, 0.6, deckLen), new THREE.MeshLambertMaterial({ color: 0x7d838c }));
+const deck = new THREE.Mesh(new THREE.BoxGeometry(HALF_W * 2 + 1.2, 0.6, deckLen), new THREE.MeshLambertMaterial({ color: 0x7885a6 }));
 deck.position.set(0, -0.3, -deckLen / 2 + 30);
 deck.receiveShadow = true;
 scene.add(deck);
-const wallMat = new THREE.MeshLambertMaterial({ color: 0xc9ccd0 });
+const wallMat = new THREE.MeshLambertMaterial({ color: 0xe3e8fa });
 for (const s of [-1, 1]) {
   const wall = new THREE.Mesh(new THREE.BoxGeometry(0.5, 1.3, deckLen), wallMat);
   wall.position.set(s * (HALF_W + 0.25), 0.65, -deckLen / 2 + 30);
   wall.receiveShadow = true; wall.castShadow = true;
   scene.add(wall);
-  const cap = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.12, deckLen), new THREE.MeshLambertMaterial({ color: 0xb89a46 }));
+  const cap = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.12, deckLen), new THREE.MeshLambertMaterial({ color: 0x55d9cd }));
   cap.position.set(s * (HALF_W + 0.25), 1.36, -deckLen / 2 + 30);
   scene.add(cap);
 }
-const water = new THREE.Mesh(new THREE.PlaneGeometry(400, 400), new THREE.MeshLambertMaterial({ color: 0x3a7fa8 }));
+const water = new THREE.Mesh(new THREE.PlaneGeometry(400, 400), new THREE.MeshLambertMaterial({ color: 0x78bfcf }));
 water.rotation.x = -Math.PI / 2;
 water.position.y = -7;
 scene.add(water);
@@ -272,13 +290,11 @@ for (let i = 0; i < 24; i++) {
   m.position.set(0, 0.01, 20 - i * 7);
   scene.add(m); movers.push({ m, wrap: 24 * 7 });
 }
-const postGeo = new THREE.CylinderGeometry(0.08, 0.1, 3.4, 6), postMat = new THREE.MeshLambertMaterial({ color: 0x4b5561 });
-const lampGeo = new THREE.BoxGeometry(0.6, 0.12, 0.3), lampMat = new THREE.MeshBasicMaterial({ color: 0xfff0b8 });
 for (let i = 0; i < 12; i++) {
   for (const s of [-1, 1]) {
     const g = new THREE.Group();
-    const p = new THREE.Mesh(postGeo, postMat); p.position.y = 3.0; g.add(p);
-    const l = new THREE.Mesh(lampGeo, lampMat); l.position.set(-s * 0.3, 4.7, 0); g.add(l);
+    const lantern = new THREE.Mesh(modelGeometries.pylon, propMat);
+    lantern.castShadow = true; g.add(lantern);
     g.position.set(s * (HALF_W + 0.25), 0, 20 - i * 14);
     scene.add(g); movers.push({ m: g, wrap: 12 * 14 });
   }
@@ -291,62 +307,17 @@ for (const s of [-1, 1]) {
   wall.position.set(s * LANE_EDGE, 0.65, LANE_WALL_END - len / 2);
   wall.castShadow = wall.receiveShadow = true;
   laneDecor.add(wall);
-  const cap = new THREE.Mesh(new THREE.BoxGeometry(LANE_WALL_T * 2 + 0.12, 0.12, len), new THREE.MeshLambertMaterial({ color: 0xb89a46 }));
+  const cap = new THREE.Mesh(new THREE.BoxGeometry(LANE_WALL_T * 2 + 0.12, 0.12, len), new THREE.MeshLambertMaterial({ color: 0x55d9cd }));
   cap.position.set(s * LANE_EDGE, 1.36, LANE_WALL_END - len / 2);
   laneDecor.add(cap);
 }
-const conveyor = new THREE.Mesh(new THREE.PlaneGeometry(HALF_W * 2 / 3 - LANE_WALL_T * 2, deckLen), new THREE.MeshLambertMaterial({ color: 0x3f78bf }));
+const conveyor = new THREE.Mesh(new THREE.PlaneGeometry(HALF_W * 2 / 3 - LANE_WALL_T * 2, deckLen), new THREE.MeshLambertMaterial({ color: 0x8ba5cf }));
 conveyor.rotation.x = -Math.PI / 2;
 conveyor.position.set(LANE_X, 0.008, -deckLen / 2 + 30);
 conveyor.receiveShadow = true;
 laneDecor.add(conveyor);
 laneDecor.visible = false;
 scene.add(laneDecor);
-
-// ---------- stick figure geometry (8 walk frames, merged) ----------
-function mergeGeos(geos) {
-  const pos = [], nor = [], idx = [];
-  let off = 0;
-  for (const g of geos) {
-    const p = g.attributes.position.array, n = g.attributes.normal.array;
-    for (let i = 0; i < p.length; i++) { pos.push(p[i]); nor.push(n[i]); }
-    const ix = g.index.array;
-    for (let i = 0; i < ix.length; i++) idx.push(ix[i] + off);
-    off += p.length / 3;
-    g.dispose();
-  }
-  const out = new THREE.BufferGeometry();
-  out.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-  out.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
-  out.setIndex(idx);
-  return out;
-}
-function limb(len, rad, at, rx, rz) {
-  const g = new THREE.CylinderGeometry(rad, rad, len, 6, 1);
-  g.translate(0, -len / 2, 0);
-  const m = new THREE.Matrix4().makeRotationFromEuler(new THREE.Euler(rx, 0, rz));
-  m.setPosition(at[0], at[1], at[2]);
-  g.applyMatrix4(m);
-  return g;
-}
-function stickPose(phase) {
-  const s = Math.sin(phase);
-  const head = new THREE.SphereGeometry(0.15, 10, 8); head.translate(0, 1.03, 0);
-  return mergeGeos([
-    head,
-    limb(0.44, 0.055, [0, 0.88, 0], 0, 0),
-    limb(0.46, 0.05, [-0.07, 0.46, 0], s * 0.65, -0.05),
-    limb(0.46, 0.05, [0.07, 0.46, 0], -s * 0.65, 0.05),
-    limb(0.36, 0.045, [-0.1, 0.82, 0], -s * 0.6, -0.32),
-    limb(0.36, 0.045, [0.1, 0.82, 0], s * 0.6, 0.32),
-  ]);
-}
-const POSES = Array.from({ length: 8 }, (_, i) => stickPose(i / 8 * Math.PI * 2));
-const poseFor = ph => POSES[Math.floor(((ph % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2) / (Math.PI * 2) * 8) % 8];
-
-const unitMat = new THREE.MeshLambertMaterial({ color: 0xffffff, emissive: 0x2a2a2a });
-const tierMats = TIERS.map(t => new THREE.MeshLambertMaterial({ color: t.color }));
-const tierOf = hp => TIERS.findIndex(t => hp <= t.max);
 
 // ---------- canvas labels ----------
 function canvasTex(w, h) {
@@ -492,13 +463,11 @@ function dieAnim(mesh, dir) {
 }
 
 // ---------- enemies ----------
-const bossMat = new THREE.MeshLambertMaterial({ color: 0x7a0f1e });
-const crownGeo = new THREE.CylinderGeometry(0.17, 0.13, 0.13, 6), crownMat = new THREE.MeshLambertMaterial({ color: 0xffc83d, emissive: 0x6b4a00 });
+const bossMat = animeMaterial(0xffffff);
 function spawnEnemy(x, z, hp, boss = false, horde = false) {
   const tier = Math.max(0, tierOf(hp));
   const scale = boss ? 2.6 : 1 + tier * 0.12;
-  const mesh = new THREE.Mesh(POSES[0], boss ? bossMat : tierMats[tier]);
-  if (boss) { const crown = new THREE.Mesh(crownGeo, crownMat); crown.position.y = 1.24; mesh.add(crown); }
+  const mesh = new THREE.Mesh(modelGeometries[boss ? 'boss' : 'enemy'][0], boss ? bossMat : tierMats[tier]);
   mesh.rotation.y = Math.PI;
   mesh.scale.setScalar(scale);
   mesh.position.set(x, 0, z);
@@ -561,6 +530,20 @@ function bossSlam(e, dt) {
     e.slam = null; e.slamCd = 3.5; e.hitT = 0.12;
   }
 }
+// enemies never shelter behind something that blocks shots: they wait a clear gap back until it is gone
+const COVER_GAP = 8;
+function holdBehindCover(e, pz) {
+  let limit = Infinity;
+  for (const b of barrels) {
+    if (b.z <= e.z || b.z > G.crowdZ) continue;
+    if (Math.abs(e.x - b.x) < (b.roll ? b.R : BARREL_R) + e.r) limit = Math.min(limit, b.z - COVER_GAP);
+  }
+  for (const g of gates) {
+    if (g.done || g.z <= e.z || g.z > G.crowdZ) continue;
+    if (e.x > g.x0 - e.r && e.x < g.x1 + e.r) limit = Math.min(limit, g.z - COVER_GAP);
+  }
+  if (e.z > limit) e.z = Math.min(e.z, Math.max(limit, pz));  // stop advancing; never jump backwards
+}
 function killEnemy(e) {
   if (e.slam) { scene.remove(e.slam.m); e.slam = null; }
   if (e.armored) G.breaker = false;  // each breaker is spent on one boss
@@ -576,20 +559,9 @@ function killEnemy(e) {
 // ---------- barrels ----------
 function spawnBarrel(side, z, hits, reward, impossible) {
   const group = new THREE.Group();
-  const bodyMat = new THREE.MeshLambertMaterial({ color: impossible ? 0x3b4048 : 0xc8462a });
-  const crate = reward === 'WEAPON' && !impossible;  // weapon upgrades come in military crates
-  if (crate) bodyMat.color.setHex(0x56683a);
-  const body = new THREE.Mesh(crate ? new THREE.BoxGeometry(BARREL_R * 1.75, BARREL_H, BARREL_R * 1.75) : new THREE.CylinderGeometry(BARREL_R, BARREL_R, BARREL_H, 32), bodyMat);
-  body.position.y = BARREL_H / 2; body.castShadow = true; group.add(body);
-  const ringMat = new THREE.MeshLambertMaterial({ color: impossible ? 0x22262c : crate ? 0x2e3a1e : 0x7a2614 });
-  if (crate) for (const y of [0.5, BARREL_H - 0.5]) {
-    const strap = new THREE.Mesh(new THREE.BoxGeometry(BARREL_R * 1.78, 0.18, BARREL_R * 1.78), ringMat);
-    strap.position.y = y; group.add(strap);
-  }
-  if (!crate) for (const y of [0.45, BARREL_H / 2, BARREL_H - 0.45]) {
-    const ring = new THREE.Mesh(new THREE.CylinderGeometry(BARREL_R + 0.04, BARREL_R + 0.04, 0.14, 32), ringMat);
-    ring.position.y = y; group.add(ring);
-  }
+  const crate = reward === 'WEAPON' && !impossible;
+  const body = new THREE.Mesh(modelGeometries[crate ? 'crate' : 'capsule'], impossible ? sealedPropMat : propMat);
+  body.castShadow = true; group.add(body);
   const lbl = canvasTex(320, 180);
   const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: lbl.tex, depthTest: false }));
   sprite.scale.set(3.6, 2.02, 1); sprite.position.y = BARREL_H + 1.35; sprite.renderOrder = 8;
@@ -736,21 +708,16 @@ function applyReward(kind, amount) {
   for (const b of barrels) b.dirty = true;
 }
 
-// ---------- three-lanes pieces: toilet rolls (left) and +1 pads (right) ----------
+// ---------- three-lanes energy cells (left) and +1 pads (right) ----------
 const ROLL_R = 1.46, ROLL_CORE = 0.5, ROLL_H = 5.4;
-const paperMat = new THREE.MeshLambertMaterial({ color: 0xf7f7f2, side: THREE.DoubleSide });
-const seamMat = new THREE.MeshLambertMaterial({ color: 0xdcdcd2 });
-const coreMat = new THREE.MeshLambertMaterial({ color: 0xa67c52, side: THREE.DoubleSide });
+const paperMat = new THREE.MeshBasicMaterial({ color: 0x71e9dc, transparent: true, opacity: 0.24, side: THREE.DoubleSide, depthWrite: false });
+const laneCellGeo = modelGeometries.capsule.clone();
+laneCellGeo.scale(ROLL_R / 2.2, ROLL_H / 2.83, ROLL_R / 2.2);
+laneCellGeo.translate(0, -ROLL_H / 2, 0);
 function spawnRoll(x, z, hp, reward) {
   const group = new THREE.Group();
-  const paper = new THREE.Mesh(new THREE.CylinderGeometry(ROLL_R, ROLL_R, ROLL_H, 40), paperMat);
+  const paper = new THREE.Mesh(laneCellGeo, propMat);
   paper.position.y = ROLL_H / 2; paper.castShadow = true; group.add(paper);
-  for (const y of [-0.9, 0, 0.9]) {
-    const seam = new THREE.Mesh(new THREE.CylinderGeometry(ROLL_R + 0.01, ROLL_R + 0.01, 0.05, 40), seamMat);
-    seam.position.y = y; paper.add(seam);
-  }
-  const core = new THREE.Mesh(new THREE.CylinderGeometry(ROLL_CORE, ROLL_CORE, ROLL_H + 0.08, 24, 1, true), coreMat);
-  core.position.y = ROLL_H / 2; group.add(core);
   const col = new THREE.Color(REWARDS[reward].color), shape = REWARDS[reward].shape;
   const gem = new THREE.Mesh(shape ? SHAPES[shape].geo : pickupGeo, new THREE.MeshLambertMaterial({ color: col, emissive: col.clone().multiplyScalar(0.45) }));
   gem.scale.setScalar(shape ? 0.4 : 0.7);
@@ -767,7 +734,7 @@ function spawnRoll(x, z, hp, reward) {
   drawBarrel(b);
   barrels.push(b);
 }
-// unspools the roll as it loses health: thinner roll, faster spin, longer sheet of paper on the deck
+// Cells discharge as they lose health: shrinking shell, faster spin, longer energy trail.
 function updateRoll(b, dt) {
   const left = Math.max(0, b.hits) / b.maxHits;
   const target = ROLL_CORE + 0.08 + (ROLL_R - ROLL_CORE - 0.08) * Math.sqrt(left);
@@ -1150,13 +1117,15 @@ function update(dt) {
   // enemies
   for (let i = enemies.length - 1; i >= 0; i--) {
     const e = enemies[i];
+    const pz = e.z;
     e.z += (scroll + e.walk) * dt;
     if (e.z > -22 && n) e.x += Math.max(-1, Math.min(1, G.crowdX - e.x)) * e.steer * dt;
     const ex = G.mode === 'lanes' && e.z < LANE_WALL_END ? LANE_EDGE - LANE_WALL_T - e.r : HALF_W - 0.35;  // walled middle lane
     e.x = Math.max(-ex, Math.min(ex, e.x));
+    holdBehindCover(e, pz);
     e.phase += dt * (7 + e.walk * 3);
     e.hitT = Math.max(0, e.hitT - dt);
-    e.mesh.geometry = poseFor(e.phase);
+    e.mesh.geometry = poseFor(e.phase, e.boss ? 'boss' : 'enemy');
     e.mesh.position.set(e.x, 0, e.z);
     e.mesh.scale.setScalar(e.scale * (1 + e.hitT * 2.5));
     if (e.boss) bossSlam(e, dt);
