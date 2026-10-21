@@ -37,6 +37,7 @@
     rock: h => (h.fall >= 0 && !h.landed ? [h.x - 1.6, h.x + 1.6] : null),
     explosive: h => [h.x - 1.6, h.x + 1.6],
     bolt: h => [h.x - 0.8, h.x + 0.8],
+    squad: h => (h.count >= g.units.length + g.G.reserve - 2 ? [h.x0 - 0.3, h.x1 + 0.3] : null),
   };
   function avoid(g, t, near = -8) {
     let w = 0;

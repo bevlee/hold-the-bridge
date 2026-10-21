@@ -456,7 +456,8 @@ const bulletR = () => 0.13 + stats.size * 0.07 + weapon().size;
 const firepower = () => Math.max(1, units.length) * stats.multi / fireInterval();
 
 // ---------- units ----------
-// uncapped modes count crew past MAX_UNITS in G.reserve; reserves step in as drawn crew fall
+// Uncapped modes count crew past MAX_UNITS in G.reserve. The drawn crowd stands for the whole crowd, so a hazard that
+// fells a drawn member takes its share of the reserve too; reserves refill the drawn crowd on the compaction tick.
 const crewCount = () => units.length + G.reserve;
 function addUnits(n) {
   const room = MAX_UNITS - units.length;
@@ -489,9 +490,11 @@ function dropUnit(u) {
 function killUnit(u) {
   if (!dropUnit(u)) return;
   dieAnim(u.mesh, Math.random() < 0.5 ? -1 : 1);
-  if (G.reserve > 0) { G.reserve--; addUnits(1); }
 }
-const hurtCrew = (h, u) => killUnit(u);
+function hurtCrew(h, u) {
+  if (G.reserve > 0) G.reserve = Math.max(0, G.reserve - Math.round(G.reserve / units.length));
+  killUnit(u);
+}
 function removeUnits(n) {
   const r = Math.min(G.reserve, n);
   G.reserve -= r; n -= r;
@@ -933,6 +936,17 @@ const turretBaseGeo = new THREE.CylinderGeometry(0.45, 0.6, 0.7, 12), turretHead
 const flashGeo = new THREE.SphereGeometry(0.22, 10, 8), flashMat = new THREE.MeshBasicMaterial({ color: 0xffd23d }), boltMat = new THREE.MeshBasicMaterial({ color: 0xff3030 });
 const LAVA_CREEP = 0.08, LAVA_PUSH = 2.5, LAVA_LIFE = 25 * SEC, LAVA_DAM_EVERY = 6 * SEC, DAM_TAG = { label: 'DAM', color: '#2f8cff', ink: '#ffffff' };
 const lavaMat = new THREE.MeshBasicMaterial({ color: 0xff5a1a, transparent: true, opacity: 0.85, depthWrite: false });
+const squadMat = animeMaterial(0xff9a9a);
+function drawSquad(h) {
+  const { ctx, c, tex } = h.lbl;
+  ctx.clearRect(0, 0, c.width, c.height);
+  ctx.fillStyle = h.king ? 'rgba(138,43,226,0.92)' : 'rgba(232,52,59,0.92)'; roundRect(ctx, 8, 8, c.width - 16, c.height - 16, 36); ctx.fill();
+  ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  const t = h.king ? `KING ${h.count}` : String(h.count);
+  fitFont(ctx, t, c.width - 50, 60, FONT); ctx.fillText(t, c.width / 2, c.height / 2 + 2);
+  tex.needsUpdate = true;
+  h.shown = h.count;
+}
 const STATUE_T = 3 * SEC, iceBlockGeo = new THREE.BoxGeometry(0.62, 1.1, 0.62);
 const iceMat = animeMaterial(0x9fd4ff), iceShellMat = new THREE.MeshLambertMaterial({ color: 0xcfeeff, transparent: true, opacity: 0.45, depthWrite: false });
 const BOOST_T = 5 * SEC, speedMat = (() => {
@@ -1157,6 +1171,44 @@ const HAZARDS = {
       if (h.t > STATUE_T) { h.gone = true; burst(h.x, h.z, 0xbfe6ff); }
     },
     blocksShot: (h, b) => Math.abs(b.x - h.x) < 0.35 + b.r && Math.abs(b.z - h.z) < 0.4,
+  },
+  squad: {  // Crowd Clash: a block of enemies under a count; touching it trades crew for squad one-for-one while the deck holds
+    spawn(x0, x1, z, count, king = false) {
+      const group = new THREE.Group(), w = x1 - x0, d = king ? 3 : 2.4, figs = [];
+      if (king) { const m = new THREE.Mesh(modelGeometries.boss[0], bossMat); m.scale.setScalar(3.2); m.rotation.y = Math.PI; m.position.z = -d / 2 - 1; group.add(m); }
+      const cols = Math.max(1, Math.floor(w / 0.55)), rows = Math.max(1, Math.floor(d / 0.55));
+      for (let i = 0; i < Math.min(count, cols * rows); i++) {
+        const m = new THREE.Mesh(modelGeometries.enemy[0], squadMat);
+        m.rotation.y = Math.PI;
+        m.position.set(-w / 2 + 0.3 + (i % cols) * (w - 0.6) / Math.max(1, cols - 1), 0, d / 2 - 0.3 - Math.floor(i / cols) * 0.55);
+        figs.push(m); group.add(m);
+      }
+      const lbl = canvasTex(256, 96), sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: lbl.tex, depthTest: false }));
+      sprite.scale.set(king ? 3 : 2.1, king ? 1.12 : 0.79, 1); sprite.position.y = king ? 6.4 : 2.1; sprite.renderOrder = 9; group.add(sprite);
+      const h = addHazard('squad', group, (x0 + x1) / 2, z, { x0, x1, d, count, figs, lbl, king, acc: 0, shown: -1, brawl: false, phase: Math.random() * 6 });
+      drawSquad(h);
+      return h;
+    },
+    update(h, dt, scroll) {
+      drift(h, dt, scroll);
+      h.phase += dt * 6;
+      for (const f of h.figs) f.geometry = poseFor(h.phase + f.position.x, 'enemy');
+      if (h.brawl) {
+        h.acc += (15 + 0.6 * Math.min(h.count, crewCount())) * dt;
+        for (; h.acc >= 1 && h.count > 0 && crewCount(); h.acc--) {
+          h.count--; G.kills++;
+          if (G.reserve > 0) G.reserve--;
+          else if (units.length) killUnit(units.reduce((a, u) => ((u.x - h.x) ** 2 + (u.z - h.z) ** 2 < (a.x - h.x) ** 2 + (a.z - h.z) ** 2 ? u : a)));
+        }
+        G.brawlT = 0.15;
+      }
+      h.brawl = false;
+      while (h.figs.length > h.count) h.group.remove(h.figs.shift());
+      if (h.shown !== h.count) drawSquad(h);
+      if (h.count <= 0) { h.gone = true; burst(h.x, h.z, 0xd8262c); if (h.king) { save('htb.clash.level', G.level + 1); endRun('win', 1 * SEC); } }
+    },
+    hits: (h, u) => u.x > h.x0 - 0.2 && u.x < h.x1 + 0.2 && Math.abs(u.z - h.z) < h.d / 2 + 0.2,
+    touch(h) { h.brawl = true; },
   },
   speed: {  // a chevron strip; crossing it speeds the scroll up for a few seconds
     spawn(x0, x1, z) {
@@ -1610,6 +1662,80 @@ function wallDirector(dt) {
   if (!enemies.length && !G.endWhy) { G.calm = true; G.calmT = WALL_CALM; wallRewardRow(); }
 }
 
+// ---------- crowd clash: no guns; grow the crowd through doors, pick fights with squads, climb the stairs, beat the King ----------
+const CLASH_SPEED = 3.2, CLASH_RUN = 90 * SEC, CLASH_GAP = 22, STAIRS = 20;
+const clashKing = L => 400 + 150 * (L - 1);
+const clashSquad = n => Math.max(3, Math.round(n * (1 + 0.15 * (G.level - 1))));
+// Rows are sized for a crowd on schedule (10 at the start, 1.5x the King by the castle), or for half the crowd you have
+// when you are far ahead, so a lead from x doors still meets squads worth fighting.
+const clashPace = () => Math.max(10 * (clashKing(G.level) * 1.5 / 10) ** Math.min(1, G.time / CLASH_RUN), crewCount() * 0.5);
+const stairMult = k => +(1 + 0.2 * k).toFixed(1);
+const CLASH_ROWS = { doors: 4, squad: 3, hazard: 2 };
+const CLASH_DOORS = ['plusVsTimes', 'plusVsTimes', 'plusVsPlus', 'timesVsMinus', 'plusVsMinus', 'trap'];
+function clashRow() {
+  const z = SPAWN_Z, n = clashPace(), s = pickSide();
+  let r = Math.random() * 9, kind = 'doors';
+  for (const k in CLASH_ROWS) { r -= CLASH_ROWS[k]; if (r <= 0) { kind = k; break; } }
+  if (G.nextAt < 20) kind = 'doors';
+  if (kind === 'doors') {
+    const id = ++G.rowId;
+    DOOR_ROWS[CLASH_DOORS[rint(0, CLASH_DOORS.length - 1)]](Math.max(4, n)).forEach((d, k) => spawnGate(k ? -s : s, z, d.value, id, d.op));
+  } else if (kind === 'squad') {
+    const half = (side, count) => HAZARDS.squad.spawn(side < 0 ? -HALF_W + 0.2 : 0.2, side < 0 ? -0.2 : HALF_W - 0.2, z, clashSquad(count));
+    const roll = Math.random();
+    if (roll < 0.4) { half(s, n * (1.2 + Math.random() * 0.6)); if (Math.random() < 0.5) half(-s, n * (0.2 + Math.random() * 0.3)); }
+    else if (roll < 0.7) { const cx = (Math.random() - 0.5) * 4; HAZARDS.squad.spawn(cx - 1.8, cx + 1.8, z, clashSquad(n * (0.3 + Math.random() * 0.4))); }
+    else half(s, n * (0.3 + Math.random() * 0.4));
+  } else {
+    const roll = Math.random();
+    if (roll < 0.4) HAZARDS.spikes.row(z);
+    else if (roll < 0.75) HAZARDS.saw.row(z);
+    else for (let i = rint(1, 2); i > 0; i--) HAZARDS.tyre.spawn((Math.random() - 0.5) * 7, z - i * 5, false);
+  }
+  G.nextAt += CLASH_GAP;
+}
+function spawnStairs() {
+  const group = new THREE.Group();
+  for (let k = 1; k <= STAIRS; k++) {
+    const step = new THREE.Mesh(new THREE.BoxGeometry(HALF_W * 2, 0.2 * k, 0.9), new THREE.MeshLambertMaterial({ color: new THREE.Color().setHSL(0.6 - k * 0.03, 0.65, 0.6) }));
+    step.position.set(0, 0.1 * k, -(k - 1) * 0.9);
+    group.add(step);
+    if (k % 2 === 0) {
+      const lbl = canvasTex(256, 96);
+      lbl.ctx.fillStyle = '#fff'; lbl.ctx.textAlign = 'center'; lbl.ctx.textBaseline = 'middle'; lbl.ctx.font = `64px ${FONT}`;
+      lbl.ctx.fillText(`×${stairMult(k)}`, 128, 50); lbl.tex.needsUpdate = true;
+      const p = new THREE.Mesh(new THREE.PlaneGeometry(2.4, 0.9), new THREE.MeshBasicMaterial({ map: lbl.tex, transparent: true, depthWrite: false }));
+      p.rotation.x = -Math.PI / 2; p.position.set(0, 0.2 * k + 0.01, -(k - 1) * 0.9); group.add(p);
+    }
+  }
+  shade(group);
+  group.position.z = SPAWN_Z;
+  scene.add(group);
+  G.stairs = { group, z: SPAWN_Z, step: 0, t: 0 };
+}
+function clashDirector(dt) {
+  G.brawlT = Math.max(0, G.brawlT - dt);
+  if (!G.stairs) {
+    if (G.time < CLASH_RUN) { while (G.dist >= G.nextAt) clashRow(); return; }
+    if (!hazards.some(h => h.kind === 'squad') && gates.every(g => g.done || g.z > G.crowdZ)) spawnStairs();
+    return;
+  }
+  const st = G.stairs;
+  if (st.done) return;
+  st.z += scrollNow() * dt;
+  st.group.position.z = st.z;
+  if (!st.reached && st.z < G.crowdZ - 1) return;
+  st.reached = G.halt = true;  // the crowd climbs, leaving one member on each step
+  if ((st.t -= dt) > 0) return;
+  st.t = 0.1 * SEC;
+  if (st.step < STAIRS && crewCount() > 1) { removeUnits(1); st.step++; return; }
+  st.done = true; G.halt = false;
+  scene.remove(st.group);
+  toast(`×${stairMult(st.step)}`, '#ffc83d', true);
+  HAZARDS.squad.spawn(-HALF_W + 0.2, HALF_W - 0.2, -26, clashKing(G.level), true);
+}
+const clashKingLeft = () => { const k = hazards.find(h => h.king); return k ? k.count : 0; };
+
 // ---------- modes: each entry owns how its run differs from the shared engine ----------
 function classicDirector() {
   while (G.dist >= G.nextAt) { const ev = nextEvent(); runEvent(ev); G.nextAt += ev.gap; }
@@ -1641,6 +1767,7 @@ const MODE_BASE = {
   meter: () => null,
   theme: { sky: SKY, deck: 0x7885a6 },
   decor: null,
+  shooting: true,
   march: 0,  // how fast enemies walk on their own when the deck holds still
   breach: () => true,  // an enemy crossed the red line; true ends the run
 };
@@ -1687,6 +1814,29 @@ const MODES = {
     hud: () => [`Wave ${G.wave}`, `${G.kills} down`],
     score: () => { const n = Math.max(0, G.calm ? G.wave : G.wave - 1); return { n, text: String(n), label: 'Waves' }; },
     endText: why => (why === 'wall' ? ['Wall broken', `It fell during wave ${G.wave}.`] : END[why]),
+  },
+  clash: {
+    label: 'Crowd Clash',
+    shooting: false,
+    uncapped: true,
+    setup() { G.level = load('htb.clash.level') || 1; G.brawlT = 0; G.nextAt = 8; addUnits(9); toast(`Level ${G.level} · King ${clashKing(G.level)}`, '#8a2be2'); },
+    scroll: () => (G.halt || G.brawlT > 0 ? 0 : CLASH_SPEED),
+    director: clashDirector,
+    meter() {
+      const k = hazards.find(h => h.king);
+      if (k) return { label: `King ${k.count}`, frac: k.count / clashKing(G.level), color: '#8a2be2' };
+      if (G.stairs) return { label: `Stairs ×${stairMult(G.stairs.step)}`, frac: G.stairs.step / STAIRS, color: '#ffc83d' };
+      return { label: 'To the castle', frac: G.time / CLASH_RUN, color: '#43dcd0' };
+    },
+    hud: () => [`Level ${G.level}`, `${G.kills} beaten`],
+    score() {
+      if (G.endWhy === 'win') return { n: 1000 + G.level, text: String(G.level), label: 'Level won' };
+      const n = Math.min(99, Math.floor(G.time / CLASH_RUN * 100));
+      return { n, text: `${n}%`, label: 'Course' };
+    },
+    endStats: s => [[s.text, s.label], [G.stairs ? `×${stairMult(G.stairs.step)}` : '-', 'Stairs'], [G.peak, 'Peak crew']],
+    endText: why => (why === 'win' ? ['Castle taken', `${crewCount()} crew left standing.`]
+      : clashKingLeft() ? ['The King holds', `${clashKingLeft()} of his guard still stand.`] : END[why]),
   },
   gauntlet: {
     label: 'Door Gauntlet',
@@ -1735,6 +1885,7 @@ function update(dt) {
       const u = G.slots.pop(); G.slots[hole] = u; u.slot = hole;
       while (G.slots.length && !G.slots[G.slots.length - 1]) G.slots.pop();
     }
+    if (G.reserve > 0 && units.length < MAX_UNITS) { const k = Math.min(G.reserve, MAX_UNITS - units.length); G.reserve -= k; addUnits(k); }
   }
   const R = SLOT * Math.sqrt(Math.max(0, G.slots.length - 1)) + 0.25;
   const xs = Math.min(1, 3.6 / R), zs = 1 / xs;
@@ -1754,7 +1905,7 @@ function update(dt) {
     u.mesh.geometry = poseFor(u.phase);
     u.mesh.position.set(u.x, 0, u.z);
     u.cd -= dt;
-    if (u.cd <= 0) { u.cd += fireInterval(); shoot(u); }
+    if (u.cd <= 0 && M.shooting) { u.cd += fireInterval(); shoot(u); }
   }
 
   // enemies
@@ -1917,7 +2068,7 @@ function update(dt) {
   }
 
   if (G.endWhy && (G.endT -= dt) <= 0) return gameOver(G.endWhy);
-  if (!units.length) return gameOver('crew');
+  if (!crewCount()) return gameOver('crew');
 }
 
 function animate(dt) {
@@ -2014,7 +2165,7 @@ function hud() {
   $('hudUnits').textContent = crewCount();
   $('hudDist').textContent = big;
   $('hudKills').textContent = small;
-  $('hudWeapon').textContent = `Crew · ${weapon().name}`;
+  $('hudWeapon').textContent = mode().shooting ? `Crew · ${weapon().name}` : 'Crew';
 }
 
 function gameOver(why) {

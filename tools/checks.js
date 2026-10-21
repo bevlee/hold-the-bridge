@@ -248,3 +248,38 @@
   }
   Object.assign(window.checks, { wall, wallPilot });
 })();
+(() => {
+  const g = window.__game, { steps } = window.checks;
+  // takes the door with the best result now, walks around squads it cannot beat and plows through ones it can
+  const clashPilot = g => {
+    const n = g.units.length + g.G.reserve, open = g.gates.filter(x => !x.done && x.z > -14);
+    const FACT = [0.25, 1 / 3, 0.5, 1, 2, 3, 4, 5], through = x => (x.op === 'x' ? Math.round(n * FACT[x.value]) : n + x.value);
+    if (open.length) { const best = open.reduce((a, x) => (through(x) > through(a) ? x : a)); g.G.target = best.z > -5 ? best.cx : window.sim.avoid(g, best.cx, -10); return; }
+    g.G.target = window.sim.avoid(g, 0, -12);
+  };
+  function clash() {
+    const r = { runs: [] };
+    for (const [L, seed] of [[1, 1], [1, 2], [1, 3], [2, 4], [3, 5]]) window.sim.seeded(seed, () => {
+      localStorage.setItem('htb.clash.level', L);
+      g.start('clash');
+      let maxBullets = 0, trades = 0, lastKills = 0, squads = 0, brawlSteps = 0, minTradeErr = 0; const seen = new Set();
+      for (let i = 0; i < 40000 && !g.G.over; i++) {
+        clashPilot(g);
+        const n0 = g.units.length + g.G.reserve, k0 = g.G.kills;
+        const sq = g.hazards.filter(h => h.kind === 'squad'), c0 = sq.reduce((a, h) => a + h.count, 0);
+        g.step(1);
+        maxBullets = Math.max(maxBullets, g.bullets.length);
+        for (const h of g.hazards) if (h.kind === 'squad' && !seen.has(h)) { seen.add(h); squads++; }
+        const dk = g.G.kills - k0;
+        if (dk) { brawlSteps++; trades += dk; const lostCrew = n0 - (g.units.length + g.G.reserve), lostSquad = c0 - g.hazards.filter(h => h.kind === 'squad').reduce((a, h) => a + h.count, 0);
+          if (lostCrew !== dk && !g.gates.some(x => x.pulse > 0.95)) minTradeErr++; }
+      }
+      const st = document.getElementById('endStats').innerText.replace(/\n/g, ' ');
+      r.runs.push({ L, seed, why: g.G.endWhy || (g.G.over ? 'crew' : 'running'), secs: Math.round(g.G.time / 2), crew: g.units.length + g.G.reserve, peak: g.G.peak, squads, trades,
+        tradeMismatchSteps: minTradeErr, maxBullets, stairs: g.G.stairs ? g.G.stairs.step : null, title: document.getElementById('endTitle').textContent, reason: document.getElementById('endReason').textContent, stats: st, nextLevel: localStorage.getItem('htb.clash.level') });
+    });
+    r.errors = window.sim.errors.length;
+    return r;
+  }
+  Object.assign(window.checks, { clash, clashPilot });
+})();
