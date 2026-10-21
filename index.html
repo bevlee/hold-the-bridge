@@ -531,7 +531,8 @@ function bossSlam(e, dt) {
   }
 }
 // enemies never shelter behind something that blocks shots: they wait a clear gap back until it is gone
-const COVER_GAP = 8;
+const COVER_GAP = 16;
+const WAVE_SETBACK = 8;  // enemy waves start this much further back than obstacle rows
 function holdBehindCover(e, pz) {
   let limit = Infinity;
   for (const b of barrels) {
@@ -907,7 +908,7 @@ function runEvent(ev) {
   const z = SPAWN_Z;
   const row = ++G.rowId;
   const s = pickSide();
-  if (ev.t === 'wave' || ev.withWave) spawnWave(ev.n, ev.withWave ? z + 8 : z);
+  if (ev.t === 'wave' || ev.withWave) spawnWave(ev.n, z - WAVE_SETBACK);  // waves start well behind the rows so gates come first
   if (ev.t === 'gates') {
     if (ev.kind === 'goodVsImpossible') { spawnGate(s, z, ev.good || goodGateValue(), row); spawnGate(-s, z, -impossibleGate(), row); }
     if (ev.kind === 'singleNeg') spawnGate(s, z, -Math.max(3, Math.round(units.length * (0.4 + Math.random() * 0.3)) + rint(1, 4)), row);
