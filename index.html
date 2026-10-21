@@ -124,6 +124,7 @@ const LANE_EDGE = HALF_W / 3;   // lane walls sit at ±LANE_EDGE
 const LANE_WALL_T = 0.16;       // half thickness of a lane wall
 const LANE_WALL_END = -3;       // lane walls stop here so the crew can cross between lanes
 const GAME_SPEED = 2;        // simulation runs this many fixed steps per frame
+const SEC = GAME_SPEED;      // game seconds per real second; design times are written in real seconds
 const MAX_UNITS = 120;
 const MAX_BULLETS = 3500;
 const BULLET_Y = 0.62;
@@ -398,7 +399,8 @@ function resetGame(mode = 'classic') {
   for (const list of [units, enemies, barrels, gates, pickups, dying, pads, hazards]) if (list) for (const o of list) removeObj(o);
   G = { mode, dist: 0, time: 0, kills: 0, peak: 1, crowdX: 0, target: 0, crowdZ: 0, nextAt: 4, script: 0, cycle: 0, rowId: 0, over: false,
         upgradeRows: 0, bossDue: false, bosses: 0, rolls: 0, rollsBroken: 0, rollCooldown: 10,  // first roll shows up once the crew has had time to grow
-        nextPad: 0, slots: [], compactT: 0, bossKills: 0 };
+        nextPad: 0, slots: [], compactT: 0, bossKills: 0, boostT: 0 };
+  defenseLine.position.z = LINE_Z;
   laneDecor.visible = MODES[mode].walledLanes;
   Object.assign(stats, { multi: 1, size: 0, diag: 0, rate: 0, dmg: BASE_DMG, spike: 0, bomb: 0, ring: 0, star: 0, weapon: 0 });
   units = []; enemies = []; bullets = []; barrels = []; gates = []; pickups = []; dying = []; pads = []; hazards = [];
@@ -415,7 +417,7 @@ function removeObj(o) {
 // ---------- derived stats ----------
 const mode = () => MODES[G.mode];
 const prog = () => mode().progress();
-const scrollNow = () => mode().scroll();
+const scrollNow = () => mode().scroll() * (G.boostT > 0 ? 1.6 : 1);
 const weapon = () => WEAPONS[stats.weapon];
 const fireInterval = () => 2.25 / (1 + 0.22 * stats.rate) / weapon().rate;
 const bulletR = () => 0.13 + stats.size * 0.07 + weapon().size;
@@ -449,6 +451,7 @@ function killUnit(u) {
   while (G.slots.length && !G.slots[G.slots.length - 1]) G.slots.pop();
   dieAnim(u.mesh, Math.random() < 0.5 ? -1 : 1);
 }
+const hurtCrew = (h, u) => killUnit(u);
 function removeUnits(n) {
   for (let i = 0; i < n && units.length; i++) killUnit(units[units.length - 1]);
 }
@@ -568,6 +571,7 @@ function spawnBarrel(side, z, hits, reward, impossible) {
   const b = { group, body, x, z, hits, reward, amount: reward === 'UNITS' ? crewBonus(prog()) : 0, impossible, lbl, shake: 0, dirty: true };
   drawBarrel(b);
   barrels.push(b);
+  return b;
 }
 function drawBarrel(b) {
   const { ctx, c, tex } = b.lbl;
@@ -577,13 +581,12 @@ function drawBarrel(b) {
   const t = String(Math.max(0, Math.ceil(b.hits)));
   fitFont(ctx, t, c.width - 30, 92, FONT);
   ctx.strokeText(t, c.width / 2, 64); ctx.fillText(t, c.width / 2, 64);
-  if (b.reward) {
-    const R = REWARDS[b.reward];
-    const label = rewardLabel(b.reward, b.amount);
-    ctx.fillStyle = R.color; roundRect(ctx, 30, 120, c.width - 60, 52, 26); ctx.fill();
+  const pill = b.reward ? { label: rewardLabel(b.reward, b.amount), color: REWARDS[b.reward].color, ink: b.reward === 'UNITS' ? '#12161d' : '#ffffff' } : b.tag;
+  if (pill) {
+    ctx.fillStyle = pill.color; roundRect(ctx, 30, 120, c.width - 60, 52, 26); ctx.fill();
     ctx.lineWidth = 4; ctx.strokeStyle = '#12161d'; ctx.stroke();
-    ctx.fillStyle = b.reward === 'UNITS' ? '#12161d' : '#ffffff';
-    fitFont(ctx, label, c.width - 100, 34, FONT); ctx.fillText(label, c.width / 2, 147);
+    ctx.fillStyle = pill.ink;
+    fitFont(ctx, pill.label, c.width - 100, 34, FONT); ctx.fillText(pill.label, c.width / 2, 147);
   }
   tex.needsUpdate = true;
   b.dirty = false;
@@ -595,6 +598,7 @@ function breakBarrel(b) {
   scene.remove(b.group);
   burst(b.x, b.z, b.roll ? 0xf7f7f2 : b.impossible ? 0x3b4048 : 0xc8462a);
   if (b.reward) spawnPickup(b.x, b.z, b.reward, b.amount);
+  if (b.tag === DAM_TAG) for (const h of hazards) if (h.kind === 'lava') h.front = Math.min(LINE_Z, h.front + LAVA_PUSH);
   if (b.roll && b.reward !== 'BREAKER' && ++G.rollsBroken % 3 === 0 && G.bosses < LANE_BOSS_HP.length) G.breakerDue = true;
 }
 
@@ -602,9 +606,10 @@ function breakBarrel(b) {
 const FACTORS = [1 / 4, 1 / 3, 1 / 2, 1, 2, 3, 4, 5];  // ×/÷ gate steps; 100 bullets move one step up
 const FX = { half: 2, one: 3, x2: 4, x3: 5 };
 const factorLabel = f => (f < 1 ? '÷' + Math.round(1 / f) : '×' + f);
-function spawnGate(side, z, value, rowId, op = '+') {
+// slide = { w, x, lo, hi, v }: a narrower gate whose centre x moves at v between lo and hi
+function spawnGate(side, z, value, rowId, op = '+', slide = null) {
   const group = new THREE.Group();
-  const w = HALF_W - 0.15;
+  const span = slide ? slide.w : HALF_W, w = span - 0.15;
   const lbl = canvasTex(320, 160);
   const panel = new THREE.Mesh(new THREE.PlaneGeometry(w, w / 2), new THREE.MeshBasicMaterial({ map: lbl.tex, transparent: true, depthWrite: false, side: THREE.DoubleSide }));
   panel.position.y = 1.55; group.add(panel);
@@ -615,13 +620,16 @@ function spawnGate(side, z, value, rowId, op = '+') {
   }
   const top = new THREE.Mesh(new THREE.BoxGeometry(w + 0.18, 0.16, 0.18), postM);
   top.position.y = 2.9; group.add(top);
-  const cx = side * HALF_W / 2;
+  const cx = slide ? slide.x : side * HALF_W / 2;
   group.position.set(cx, 0, z);
   scene.add(group);
-  const g = { group, panel, side, x0: side < 0 ? -HALF_W : 0, x1: side < 0 ? 0 : HALF_W, z, pz: z, op, value, rowId, lbl, done: false, fade: 0, dirty: true, pulse: 0, prog: 0 };
+  const g = { group, panel, side, cx, span, x0: cx - span / 2, x1: cx + span / 2, z, pz: z, op, value, rowId, lbl, done: false, fade: 0, dirty: true, pulse: 0, prog: 0,
+              vx: slide ? slide.v : 0, lo: slide && slide.lo, hi: slide && slide.hi };
   drawGate(g);
   gates.push(g);
+  return g;
 }
+const crowdIn = g => G.crowdX >= g.x0 && G.crowdX < g.x1;
 function drawGate(g) {
   const { ctx, c, tex } = g.lbl;
   ctx.clearRect(0, 0, c.width, c.height);
@@ -814,18 +822,264 @@ function lanesDirector(dt) {
   }
 }
 
-// ---------- rolling tyres: indestructible, dodge them ----------
-const tyreGeo = new THREE.TorusGeometry(1.0, 0.42, 12, 24), hubGeo = new THREE.CylinderGeometry(0.62, 0.62, 0.5, 16);
-const tyreMat = new THREE.MeshLambertMaterial({ color: 0x23262c }), hubMat = new THREE.MeshLambertMaterial({ color: 0xa3acb6 });
-function spawnTyre(x, z, zig) {
-  const group = new THREE.Group(), spin = new THREE.Group();
-  spin.position.y = 1.42; group.add(spin);
-  const tyre = new THREE.Mesh(tyreGeo, tyreMat); tyre.rotation.y = Math.PI / 2; spin.add(tyre);
-  const hub = new THREE.Mesh(hubGeo, hubMat); hub.rotation.z = Math.PI / 2; spin.add(hub);
+// ---------- hazards: one table entry per obstacle kind; the update and bullet loops dispatch through it ----------
+// spawn(...) builds and registers one; update(h, dt, scroll) moves it; hits(h, u) tests a crew member and touch(h, u) acts
+// on it (default: the crew member dies); blocksShot(h, b) stops a bullet and onShot(h, b) reacts to it.
+function addHazard(kind, group, x, z, props) {
   shade(group);
   group.position.set(x, 0, z);
   scene.add(group);
-  hazards.push({ group, spin, x, z, vx: zig ? (Math.random() < 0.5 ? -2.2 : 2.2) : 0, speed: 2.2 });
+  const h = { kind, group, x, z, t: 0, ...props };
+  hazards.push(h);
+  return h;
+}
+const drift = (h, dt, scroll) => { h.z += scroll * dt; h.group.position.z = h.z; };
+const tyreGeo = new THREE.TorusGeometry(1.0, 0.42, 12, 24), hubGeo = new THREE.CylinderGeometry(0.62, 0.62, 0.5, 16);
+const tyreMat = new THREE.MeshLambertMaterial({ color: 0x23262c }), hubMat = new THREE.MeshLambertMaterial({ color: 0xa3acb6 });
+const metalMat = new THREE.MeshLambertMaterial({ color: 0x3a3f48 }), steelMat = new THREE.MeshLambertMaterial({ color: 0xd8dde6 });
+const hazardRedMat = new THREE.MeshLambertMaterial({ color: 0xd8262c }), stripeMat = new THREE.MeshLambertMaterial({ color: 0xffc83d });
+const SPIKE_D = 0.9, spikeGeo = new THREE.ConeGeometry(0.15, 0.5, 6);
+const sawGeo = new THREE.CylinderGeometry(0.72, 0.72, 0.08, 24), toothGeo = new THREE.ConeGeometry(0.1, 0.24, 4);
+const LASER_IDLE = 0.8 * SEC, LASER_WARN = 1 * SEC, LASER_CYCLE = LASER_IDLE + LASER_WARN + 0.5 * SEC;
+const laserPostGeo = new THREE.BoxGeometry(0.3, 1.8, 0.3), laserBeamGeo = new THREE.BoxGeometry(HALF_W - 0.2, 0.1, 0.1);
+const ROCK_FALL = 1.2 * SEC, ROCK_STAY = 3 * SEC;
+const shadowGeo = new THREE.CircleGeometry(1.1, 24), rockGeo = new THREE.IcosahedronGeometry(0.95, 0);
+const rockMat = new THREE.MeshLambertMaterial({ color: 0x7a6a5a, flatShading: true });
+const EXPLODE_R = 3, drumGeo = new THREE.CylinderGeometry(0.5, 0.5, 1.1, 14), stripeGeo = new THREE.CylinderGeometry(0.52, 0.52, 0.14, 14);
+const TURRET_CD = 2 * SEC, TURRET_FLASH = 0.35 * SEC, BOLT_SPEED = 3.2;
+const turretBaseGeo = new THREE.CylinderGeometry(0.45, 0.6, 0.7, 12), turretHeadGeo = new THREE.BoxGeometry(0.6, 0.45, 0.7), turretGunGeo = new THREE.CylinderGeometry(0.09, 0.09, 0.8, 8);
+const flashGeo = new THREE.SphereGeometry(0.22, 10, 8), flashMat = new THREE.MeshBasicMaterial({ color: 0xffd23d }), boltMat = new THREE.MeshBasicMaterial({ color: 0xff3030 });
+const LAVA_CREEP = 0.08, LAVA_PUSH = 2.5, LAVA_LIFE = 25 * SEC, LAVA_DAM_EVERY = 6 * SEC, DAM_TAG = { label: 'DAM', color: '#2f8cff', ink: '#ffffff' };
+const lavaMat = new THREE.MeshBasicMaterial({ color: 0xff5a1a, transparent: true, opacity: 0.85, depthWrite: false });
+const BOOST_T = 5 * SEC, speedMat = (() => {
+  const { c, ctx, tex } = canvasTex(128, 64);
+  ctx.fillStyle = 'rgba(47,140,255,0.8)'; ctx.fillRect(0, 0, 128, 64);
+  ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 9; ctx.lineJoin = 'round';
+  for (const x of [22, 64, 106]) { ctx.beginPath(); ctx.moveTo(x - 14, 46); ctx.lineTo(x, 18); ctx.lineTo(x + 14, 46); ctx.stroke(); }
+  tex.wrapS = THREE.RepeatWrapping; tex.repeat.set(2, 1);
+  return new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false });
+})();
+const HAZARDS = {
+  tyre: {  // rolls down the deck faster than it scrolls, sometimes zig-zagging; indestructible, dodge it
+    spawn(x, z, zig) {
+      const group = new THREE.Group(), spin = new THREE.Group();
+      spin.position.y = 1.42; group.add(spin);
+      const tyre = new THREE.Mesh(tyreGeo, tyreMat); tyre.rotation.y = Math.PI / 2; spin.add(tyre);
+      const hub = new THREE.Mesh(hubGeo, hubMat); hub.rotation.z = Math.PI / 2; spin.add(hub);
+      return addHazard('tyre', group, x, z, { spin, vx: zig ? (Math.random() < 0.5 ? -2.2 : 2.2) : 0, speed: 2.2 });
+    },
+    update(h, dt, scroll) {
+      const v = scroll + h.speed;
+      h.z += v * dt; h.x += h.vx * dt;
+      if (Math.abs(h.x) > HALF_W - 0.6) { h.x = Math.sign(h.x) * (HALF_W - 0.6); h.vx = -h.vx; }
+      h.spin.rotation.x += v / 1.42 * dt;
+      h.group.position.set(h.x, 0, h.z);
+    },
+    hits: (h, u) => Math.abs(u.x - h.x) < 0.65 && Math.abs(u.z - h.z) < 1.3,
+    blocksShot: (h, b) => Math.abs(h.z - b.z) < 1.4 && Math.abs(h.x - b.x) < 0.55 + b.r,
+  },
+  spikes: {  // a static strip across part of the deck
+    spawn(x0, x1, z) {
+      const group = new THREE.Group(), w = x1 - x0;
+      const plate = new THREE.Mesh(new THREE.BoxGeometry(w, 0.08, SPIKE_D), metalMat); plate.position.y = 0.04; group.add(plate);
+      for (let i = 0; i < Math.floor(w / 0.4); i++) for (const r of [0, 1]) {
+        const c = new THREE.Mesh(spikeGeo, steelMat); c.position.set(-w / 2 + 0.2 + i * 0.4 + r * 0.2, 0.3, r ? 0.2 : -0.2); group.add(c);
+      }
+      return addHazard('spikes', group, (x0 + x1) / 2, z, { x0, x1 });
+    },
+    update: drift,
+    hits: (h, u) => u.x > h.x0 && u.x < h.x1 && Math.abs(u.z - h.z) < SPIKE_D / 2 + 0.12,
+    row(z) { const s = pickSide(); HAZARDS.spikes.spawn(s < 0 ? -HALF_W : 0, s < 0 ? 0 : HALF_W, z); },
+  },
+  saw: {  // a spinning blade, fixed or sliding along a rail from lo to hi
+    spawn(z, lo, hi = lo, v = 2) {
+      const group = new THREE.Group(), blade = new THREE.Group(), cx = (lo + hi) / 2;
+      blade.position.y = 0.7; group.add(blade);
+      const disc = new THREE.Mesh(sawGeo, steelMat); disc.rotation.x = Math.PI / 2; blade.add(disc);
+      const hub = new THREE.Mesh(hubGeo, hazardRedMat); hub.scale.set(0.4, 0.3, 0.4); hub.rotation.x = Math.PI / 2; blade.add(hub);
+      for (let i = 0; i < 10; i++) {
+        const a = i / 10 * Math.PI * 2, t = new THREE.Mesh(toothGeo, steelMat);
+        t.position.set(Math.cos(a) * 0.78, Math.sin(a) * 0.78, 0); t.rotation.z = a - Math.PI / 2; blade.add(t);
+      }
+      const rail = new THREE.Mesh(new THREE.BoxGeometry(hi - lo + 1.7, 0.04, 0.22), metalMat); rail.position.y = 0.02; group.add(rail);
+      return addHazard('saw', group, cx, z, { cx, blade, lo, hi, vx: hi > lo ? v * pickSide() : 0, sx: lo + Math.random() * (hi - lo) });
+    },
+    update(h, dt, scroll) {
+      h.sx += h.vx * dt;
+      if (h.sx < h.lo || h.sx > h.hi) { h.sx = Math.max(h.lo, Math.min(h.hi, h.sx)); h.vx = -h.vx; }
+      h.blade.position.x = h.sx - h.cx;
+      h.blade.rotation.z -= dt * 9;
+      drift(h, dt, scroll);
+    },
+    hits: (h, u) => Math.abs(u.x - h.sx) < 0.85 && Math.abs(u.z - h.z) < 0.3,
+    row(z) { const s = pickSide(); if (Math.random() < 0.5) HAZARDS.saw.spawn(z, -HALF_W + 1, HALF_W - 1, 2.6); else HAZARDS.saw.spawn(z, s < 0 ? -HALF_W + 1 : 1, s < 0 ? -1 : HALF_W - 1); },
+  },
+  laser: {  // a gantry whose beam alternates halves: it flashes for a second, then burns that half for half a second
+    spawn(z, vz = 0) {
+      const group = new THREE.Group();
+      for (const s of [-1, 0, 1]) { const p = new THREE.Mesh(laserPostGeo, metalMat); p.position.set(s * (HALF_W + 0.1), 0.9, 0); group.add(p); }
+      const beam = new THREE.Mesh(laserBeamGeo, new THREE.MeshBasicMaterial({ color: 0xff2a2a, transparent: true, opacity: 0.6, depthWrite: false }));
+      beam.position.y = 0.75; beam.visible = false; group.add(beam);
+      return addHazard('laser', group, 0, z, { beam, vz, cyc: Math.random() * LASER_CYCLE, side: pickSide() });
+    },
+    update(h, dt, scroll) {
+      h.z += (scroll + h.vz) * dt;
+      h.group.position.z = h.z;
+      h.cyc += dt;
+      if (h.cyc >= LASER_CYCLE) { h.cyc -= LASER_CYCLE; h.side = -h.side; }
+      const warn = h.cyc > LASER_IDLE, fire = h.cyc > LASER_IDLE + LASER_WARN;
+      h.firing = fire; h.x0 = h.side < 0 ? -HALF_W : 0; h.x1 = h.x0 + HALF_W;
+      h.beam.visible = warn && (fire || Math.sin(h.cyc * 30) > -0.3);
+      h.beam.position.x = h.side * HALF_W / 2;
+      h.beam.scale.set(1, fire ? 3 : 0.6, fire ? 3 : 0.6);
+      h.beam.material.opacity = fire ? 0.95 : 0.45;
+      if (fire) { for (const e of enemies) if (!e.boss && e.x > h.x0 && e.x < h.x1 && Math.abs(e.z - h.z) < 0.45) damage(e, e.hp); flushKills(); }
+    },
+    hits: (h, u) => h.firing && u.x > h.x0 && u.x < h.x1 && Math.abs(u.z - h.z) < 0.35,
+    row(z) { HAZARDS.laser.spawn(z); },
+  },
+  rock: {  // after wait, a shadow tracks to where the crowd will be and a rock lands there; the rock then soaks shots
+    spawn(wait) {
+      const group = new THREE.Group();
+      const shadow = new THREE.Mesh(shadowGeo, new THREE.MeshBasicMaterial({ color: 0x12161d, transparent: true, opacity: 0, depthWrite: false }));
+      shadow.rotation.x = -Math.PI / 2; shadow.position.y = 0.03; group.add(shadow);
+      const rock = new THREE.Mesh(rockGeo, rockMat); rock.visible = false; group.add(rock);
+      group.visible = false;
+      return addHazard('rock', group, 0, SPAWN_Z, { shadow, rock, wait, fall: -1 });
+    },
+    update(h, dt, scroll) {
+      h.impact = false;
+      if (h.fall < 0) {
+        if ((h.wait -= dt) > 0) return;
+        h.fall = 0; h.group.visible = true;
+        h.x = Math.max(-HALF_W + 1, Math.min(HALF_W - 1, G.crowdX + (Math.random() - 0.5) * 2));
+        h.z = G.crowdZ - scroll * ROCK_FALL;
+      }
+      drift(h, dt, scroll);
+      h.group.position.x = h.x;
+      if (!h.landed) {
+        h.fall += dt;
+        const k = Math.min(1, h.fall / ROCK_FALL);
+        h.shadow.scale.setScalar(0.35 + 0.65 * k); h.shadow.material.opacity = 0.15 + 0.4 * k;
+        h.rock.visible = k > 0.55; h.rock.position.y = 0.75 + 18 * (1 - k) * (1 - k);
+        if (k >= 1) { h.landed = h.impact = true; h.fall = 0; burst(h.x, h.z, 0x7a6a5a); }
+      } else if ((h.fall += dt) > ROCK_STAY) { h.gone = true; burst(h.x, h.z, 0x7a6a5a); }
+    },
+    hits: (h, u) => h.impact && (u.x - h.x) ** 2 + (u.z - h.z) ** 2 < 1.15 * 1.15,
+    blocksShot: (h, b) => h.landed && Math.abs(b.x - h.x) < 0.95 + b.r && Math.abs(b.z - h.z) < 0.95,
+    row() { toast('Falling rocks', '#e8343b'); for (let i = 0; i < 3; i++) HAZARDS.rock.spawn(i * 1.4 * SEC); },
+  },
+  explosive: {  // three shots set it off and it hurts nearby enemies; walk into it and it goes off on the crew
+    spawn(x, z) {
+      const group = new THREE.Group();
+      const body = new THREE.Mesh(drumGeo, hazardRedMat); body.position.y = 0.55; group.add(body);
+      for (const y of [0.3, 0.8]) { const st = new THREE.Mesh(stripeGeo, stripeMat); st.position.y = y; group.add(st); }
+      return addHazard('explosive', group, x, z, { hp: 3, shake: 0 });
+    },
+    update(h, dt, scroll) {
+      h.shake = Math.max(0, h.shake - dt);
+      drift(h, dt, scroll);
+      h.group.position.x = h.x + (h.shake ? (Math.random() - 0.5) * 0.12 : 0);
+    },
+    hits: (h, u) => (u.x - h.x) ** 2 + (u.z - h.z) ** 2 < 0.8 * 0.8,
+    touch: h => explode(h, true),
+    blocksShot: (h, b) => (b.x - h.x) ** 2 + (b.z - h.z) ** 2 < (0.5 + b.r) ** 2,
+    onShot(h) { h.shake = 0.1; if (--h.hp <= 0) explode(h, false); },
+    row(z) {
+      spawnWave(0, z - WAVE_SETBACK);
+      for (const s of [-1, 1]) if (Math.random() < 0.8) HAZARDS.explosive.spawn(s * (1 + Math.random() * 3), z - 4 - Math.random() * 4);
+    },
+  },
+  turret: {  // sits on the deck edge and fires a slow bolt at the crowd every 2 seconds, after a muzzle flash
+    spawn(side, z) {
+      const group = new THREE.Group(), head = new THREE.Group();
+      const base = new THREE.Mesh(turretBaseGeo, metalMat); base.position.y = 0.35; group.add(base);
+      head.position.y = 0.95; group.add(head);
+      const box = new THREE.Mesh(turretHeadGeo, hazardRedMat); head.add(box);
+      const gun = new THREE.Mesh(turretGunGeo, metalMat); gun.rotation.x = Math.PI / 2; gun.position.z = 0.55; head.add(gun);
+      const flash = new THREE.Mesh(flashGeo, flashMat); flash.position.z = 1.05; flash.visible = false; head.add(flash);
+      const lbl = canvasTex(320, 180), sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: lbl.tex, depthTest: false }));
+      sprite.scale.set(2.6, 1.46, 1); sprite.position.y = 2.3; sprite.renderOrder = 8; group.add(sprite);
+      const h = addHazard('turret', group, side * (HALF_W - 0.7), z, { head, flash, lbl, hits: Math.max(12, Math.round(firepower() * 2.5)), cd: TURRET_CD * (0.5 + Math.random() * 0.5), dirty: true });
+      drawBarrel(h);
+      return h;
+    },
+    update(h, dt, scroll) {
+      drift(h, dt, scroll);
+      h.head.rotation.y = Math.atan2(G.crowdX - h.x, G.crowdZ - h.z);
+      if (h.z > -32 && h.z < G.crowdZ - 3 && units.length) {
+        h.cd -= dt;
+        h.flash.visible = h.cd < TURRET_FLASH;
+        if (h.cd <= 0) { h.cd = TURRET_CD; HAZARDS.bolt.spawn(h.x, h.z, G.crowdX, G.crowdZ); }
+      } else h.flash.visible = false;
+      if (h.dirty) drawBarrel(h);
+    },
+    blocksShot: (h, b) => (b.x - h.x) ** 2 + (b.z - h.z) ** 2 < (0.6 + b.r) ** 2,
+    onShot(h) { h.dirty = true; if (--h.hits <= 0) { h.gone = true; burst(h.x, h.z, 0x3a3f48); } },
+    row(z) { HAZARDS.turret.spawn(pickSide(), z); },
+  },
+  bolt: {
+    spawn(x, z, tx, tz) {
+      const group = new THREE.Group(), m = new THREE.Mesh(flashGeo, boltMat); m.position.y = 0.7; group.add(m);
+      const d = Math.hypot(tx - x, tz - z) || 1;
+      return addHazard('bolt', group, x, z, { vx: (tx - x) / d * BOLT_SPEED, vz: (tz - z) / d * BOLT_SPEED });
+    },
+    update(h, dt) {
+      h.x += h.vx * dt; h.z += h.vz * dt;
+      h.group.position.set(h.x, 0, h.z);
+      if (h.t > 8 * SEC) h.gone = true;
+    },
+    hits: (h, u) => (u.x - h.x) ** 2 + (u.z - h.z) ** 2 < 0.4 * 0.4,
+    touch(h, u) { hurtCrew(h, u); h.gone = true; },
+  },
+  lava: {  // the red line creeps up the deck and takes anyone behind it; dam barrels keep coming, and each one broken pushes it back
+    spawn(wait = 0) {
+      const group = new THREE.Group();
+      const slab = new THREE.Mesh(slamGeo, lavaMat); slab.rotation.x = -Math.PI / 2; slab.position.y = 0.025; group.add(slab);
+      group.visible = false;
+      return addHazard('lava', group, 0, 0, { slab, wait, front: LINE_Z, life: LAVA_LIFE, damT: 0, damSide: pickSide() });
+    },
+    update(h, dt) {
+      if ((h.wait -= dt) > 0) return;
+      h.group.visible = true;
+      h.life -= dt;
+      if ((h.damT -= dt) <= 0 && h.life > LAVA_DAM_EVERY) {
+        h.damT = LAVA_DAM_EVERY; h.damSide = -h.damSide;
+        Object.assign(spawnBarrel(h.damSide, SPAWN_Z, breakableHits(0.6), null, false), { tag: DAM_TAG, dirty: true });
+      }
+      h.front += (h.life > 0 ? -LAVA_CREEP : LAVA_CREEP * 6) * dt;
+      if (h.life <= 0 && h.front >= LINE_Z) { h.gone = true; defenseLine.position.z = LINE_Z; return; }
+      const back = LINE_Z + 6;
+      h.slab.scale.set(HALF_W * 2, back - h.front, 1); h.slab.position.z = (back + h.front) / 2;
+      lavaMat.color.setRGB(1, 0.32 + 0.12 * Math.sin(h.t * 6), 0.08);
+      defenseLine.position.z = h.front;
+    },
+    hits: (h, u) => h.wait <= 0 && u.z > h.front + 0.1,
+    row() {
+      if (hazards.some(h => h.kind === 'lava')) return;
+      HAZARDS.lava.spawn();
+      toast('Lava rising · break the dams', '#ff7a00');
+    },
+  },
+  speed: {  // a chevron strip; crossing it speeds the scroll up for a few seconds
+    spawn(x0, x1, z) {
+      const group = new THREE.Group();
+      const strip = new THREE.Mesh(new THREE.PlaneGeometry(x1 - x0, 1.6), speedMat); strip.rotation.x = -Math.PI / 2; strip.position.y = 0.02; group.add(strip);
+      return addHazard('speed', group, (x0 + x1) / 2, z, { x0, x1, strip });
+    },
+    update: drift,
+    hits: (h, u) => !h.used && u.x > h.x0 && u.x < h.x1 && Math.abs(u.z - h.z) < 0.8,
+    touch(h) { h.used = true; G.boostT = BOOST_T; toast('Speed ×1.6', '#2f8cff'); },
+    row(z) { const s = pickSide(); HAZARDS.speed.spawn(s < 0 ? -HALF_W : 0, s < 0 ? 0 : HALF_W, z); },
+  },
+};
+function explode(h, onCrew) {
+  h.gone = true;
+  boom(h.x, h.z, EXPLODE_R); burst(h.x, h.z, 0xd8262c);
+  const dmg = Math.max(stats.dmg * 8, enemyHp(prog()) * 3);
+  for (const e of enemies) if ((e.x - h.x) ** 2 + (e.z - h.z) ** 2 < EXPLODE_R * EXPLODE_R) damage(e, dmg);
+  flushKills();
+  if (onCrew) for (let j = units.length - 1; j >= 0; j--) { const u = units[j]; if ((u.x - h.x) ** 2 + (u.z - h.z) ** 2 < 1.8 * 1.8) hurtCrew(h, u); }
 }
 
 // ---------- particles ----------
@@ -886,6 +1140,15 @@ const CHOICES = [
   { t: 'gates', kind: 'plusVsTimes', w: 3 },        // the classic "+50 or ×3?" door choice
   { t: 'gates', kind: 'divideTrap', w: 1 },         // ÷2 or lose a chunk: pick the lesser evil, or shoot it better
   { t: 'gates', kind: 'timesVsImpossible', w: 1 },
+  { t: 'gates', kind: 'moving', w: 3 },
+  { t: 'hazard', kind: 'spikes', w: 2 },
+  { t: 'hazard', kind: 'explosive', w: 2 },
+  { t: 'hazard', kind: 'saw', w: 1 },
+  { t: 'hazard', kind: 'laser', w: 1 },
+  { t: 'hazard', kind: 'rock', w: 1 },
+  { t: 'hazard', kind: 'turret', w: 1 },
+  { t: 'hazard', kind: 'speed', w: 1 },
+  { t: 'hazard', kind: 'lava', w: 0.6 },
 ];
 function nextEvent() {
   if (G.bossDue) { G.bossDue = false; return { t: 'boss', gap: 24 }; }
@@ -910,7 +1173,8 @@ function runEvent(ev) {
     if (ev.kind === 'goodVsFixable') { spawnGate(s, z, goodGateValue(), row); spawnGate(-s, z, -Math.max(1, Math.round(firepower() * 6 / GATE_BULLETS)), row); }
   }
   if (ev.t === 'boss') spawnBoss((Math.random() - 0.5) * 5);
-  if (ev.tyres) for (let i = rint(1, 2); i > 0; i--) spawnTyre((Math.random() - 0.5) * 7, z + 6 - i * 4, Math.random() < 0.5);
+  if (ev.t === 'hazard') HAZARDS[ev.kind].row(z);
+  if (ev.tyres) for (let i = rint(1, 2); i > 0; i--) HAZARDS.tyre.spawn((Math.random() - 0.5) * 7, z + 6 - i * 4, Math.random() < 0.5);
   if (ev.t === 'gates') {
     const n = Math.max(1, units.length);
     if (ev.kind === 'plusVsTimes') {
@@ -920,6 +1184,10 @@ function runEvent(ev) {
     }
     if (ev.kind === 'divideTrap') { spawnGate(s, z, FX.half, row, 'x'); spawnGate(-s, z, -Math.max(2, Math.round(n * (0.3 + Math.random() * 0.4))), row); }
     if (ev.kind === 'timesVsImpossible') { spawnGate(s, z, FX.x2, row, 'x'); spawnGate(-s, z, -impossibleGate(), row); }
+    if (ev.kind === 'moving') {  // one narrow good gate sliding across the deck: time the entry or miss it
+      const w = 3.2, lim = HALF_W - w / 2, slide = { w, x: (Math.random() - 0.5) * 2 * lim, lo: -lim, hi: lim, v: pickSide() * (1.4 + Math.random()) };
+      if (Math.random() < 0.4) spawnGate(0, z, FX.x2, row, 'x', slide); else spawnGate(0, z, goodGateValue() * 2, row, '+', slide);
+    }
   }
   if ((ev.t === 'barrels' && ev.kind !== 'singleHuge') || ev.t === 'mixed') {
     if (++G.upgradeRows % 3 === 0) G.bossDue = true;  // a boss follows every third upgrade row
@@ -1108,6 +1376,7 @@ for (const k in MODES) MODES[k] = { ...MODE_BASE, ...MODES[k] };
 // ---------- update ----------
 function update(dt) {
   G.time += dt;
+  G.boostT = Math.max(0, G.boostT - dt);
   const scroll = scrollNow();
   G.dist += scroll * dt;
   const M = mode();
@@ -1207,29 +1476,31 @@ function update(dt) {
     const g = gates[i];
     g.pz = g.z;
     g.z += scroll * dt;
+    if (g.vx) {
+      g.cx += g.vx * dt;
+      if (g.cx < g.lo || g.cx > g.hi) { g.cx = Math.max(g.lo, Math.min(g.hi, g.cx)); g.vx = -g.vx; }
+      g.x0 = g.cx - g.span / 2; g.x1 = g.cx + g.span / 2;
+    }
     if (!g.done && g.z >= G.crowdZ && n) {
-      const side = G.crowdX < 0 ? -1 : 1;
-      if (side === g.side) applyGate(g);
-      else if (!gates.some(o => o.rowId === g.rowId && o.side === side && !o.done)) for (const o of gates) if (o.rowId === g.rowId) o.done = true;
+      if (crowdIn(g)) applyGate(g);
+      else if (!gates.some(o => o.rowId === g.rowId && !o.done && crowdIn(o))) for (const o of gates) if (o.rowId === g.rowId) o.done = true;
     }
     if (g.dirty) drawGate(g);
     if (g.done) g.fade = Math.min(1, g.fade + dt * 2);
     g.pulse = Math.max(0, g.pulse - dt * 2);
     g.panel.material.opacity = 1 - g.fade * 0.75;
-    g.group.position.set(g.side * HALF_W / 2, 0, g.z);
+    g.group.position.set(g.cx, 0, g.z);
     g.group.scale.setScalar(1 + g.pulse * 0.15);
     if (g.z > 16) { scene.remove(g.group); gates.splice(i, 1); }
   }
 
-  // rolling tyres
+  // hazards
   for (let i = hazards.length - 1; i >= 0; i--) {
-    const h = hazards[i], v = scroll + h.speed;
-    h.z += v * dt; h.x += h.vx * dt;
-    if (Math.abs(h.x) > HALF_W - 0.6) { h.x = Math.sign(h.x) * (HALF_W - 0.6); h.vx = -h.vx; }
-    h.spin.rotation.x += v / 1.42 * dt;
-    h.group.position.set(h.x, 0, h.z);
-    for (let j = units.length - 1; j >= 0; j--) { const u = units[j]; if (Math.abs(u.x - h.x) < 0.65 && Math.abs(u.z - h.z) < 1.3) killUnit(u); }
-    if (h.z > 14) { scene.remove(h.group); hazards.splice(i, 1); }
+    const h = hazards[i], H = HAZARDS[h.kind];
+    h.t += dt;
+    H.update(h, dt, scroll);
+    if (H.hits) for (let j = units.length - 1; j >= 0 && !h.gone; j--) if (H.hits(h, units[j])) (H.touch || hurtCrew)(h, units[j]);
+    if (h.gone || h.z > 16) { removeObj(h); hazards.splice(i, 1); }
   }
 
   // +1 pads
@@ -1282,8 +1553,9 @@ function update(dt) {
         break;
       }
     }
-    if (!dead) for (const h of hazards) {  // tyres soak up shots
-      if (Math.abs(h.z - b.z) < 1.4 && Math.abs(h.x - b.x) < 0.55 + b.r) { dead = true; break; }
+    if (!dead) for (const h of hazards) {
+      const H = HAZARDS[h.kind];
+      if (!h.gone && H.blocksShot && H.blocksShot(h, b)) { if (H.onShot) H.onShot(h, b); dead = true; break; }
     }
     if (!dead) for (const g of gates) {
       if (g.done) continue;
@@ -1475,6 +1747,6 @@ function frame(now) {
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
-window.__game = { start, step(n, dt = 1 / 60) { for (let i = 0; i < n && running; i++) update(dt); }, addUnits: n => addUnits(n), spawnBoss, spawnTyre, get hazards() { return hazards; }, get G() { return G; }, stats, get units() { return units; }, get enemies() { return enemies; }, get bullets() { return bullets; }, get gates() { return gates; }, get barrels() { return barrels; }, get pickups() { return pickups; } };
+window.__game = { start, step(n, dt = 1 / 60) { for (let i = 0; i < n && running; i++) update(dt); }, addUnits: n => addUnits(n), spawnBoss, spawnEnemy, spawnHazard: (kind, ...a) => HAZARDS[kind].spawn(...a), hazardRow: (kind, z = SPAWN_Z) => HAZARDS[kind].row(z), get hazards() { return hazards; }, get G() { return G; }, stats, get units() { return units; }, get enemies() { return enemies; }, get bullets() { return bullets; }, get gates() { return gates; }, get barrels() { return barrels; }, get pickups() { return pickups; } };
 })();
 </script>

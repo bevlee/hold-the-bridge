@@ -26,6 +26,35 @@
       g.G.bosses, g.bullets.length, g.G.over, g.stats.weapon, g.stats.multi].join(',');
   }
 
+  // x-intervals a crowd should keep out of in the next few metres, per hazard kind
+  const ZONES = {
+    tyre: h => [h.x - 1.2, h.x + 1.2],
+    spikes: h => [h.x0, h.x1],
+    saw: h => [h.lo - 1, h.hi + 1],
+    laser: h => (h.cyc > 0.5 ? [h.side < 0 ? -5 : 0, h.side < 0 ? 0 : 5] : null),
+    rock: h => (h.fall >= 0 && !h.landed ? [h.x - 1.6, h.x + 1.6] : null),
+    explosive: h => [h.x - 1.6, h.x + 1.6],
+    bolt: h => [h.x - 0.8, h.x + 0.8],
+  };
+  function avoid(g, t, near = -8) {
+    let w = 0;
+    for (const u of g.units) w = Math.max(w, Math.abs(u.x - g.G.crowdX));
+    const bad = [];
+    for (const h of g.hazards) {
+      const zone = ZONES[h.kind] && h.z > near && h.z < 4 && ZONES[h.kind](h);
+      if (zone) bad.push(zone);
+    }
+    for (const b of g.barrels) if (b.z > -9 && b.z < 4) bad.push([b.x - (b.R || 2.42) - 0.2, b.x + (b.R || 2.42) + 0.2]);
+    if (!bad.length) return t;
+    const lim = Math.max(0, 4.65 - w);
+    let best = t, bd = Infinity;
+    for (let c = -lim; c <= lim + 1e-9; c += 0.25) {
+      const clash = bad.reduce((n, [a, b]) => n + Math.max(0, Math.min(c + w, b) - Math.max(c - w, a)), 0);
+      const score = clash * 100 + Math.abs(c - t);
+      if (score < bd) { bd = score; best = c; }
+    }
+    return best;
+  }
   const gateValue = x => (x.op === 'x' ? [0.25, 1 / 3, 0.5, 1, 2, 3, 4, 5][x.value] * 30 - 30 : x.value);
   const pilots = {
     lanes(g) {
@@ -51,11 +80,12 @@
       if (near.length === 1) t = near[0].x < 0 ? 2.6 : -2.6;
       const row = g.gates.filter(x => !x.done && x.z > -10 && x.z < 1);
       if (row.length) {
-        const L = row.find(x => x.x1 <= 0.01), R = row.find(x => x.x0 >= -0.01);
-        t = (L ? gateValue(L) : 0) > (R ? gateValue(R) : 0) ? -2.6 : 2.6;
+        const best = row.reduce((a, x) => (gateValue(x) > gateValue(a) ? x : a));
+        g.G.target = gateValue(best) > 0 ? best.cx : (row.length === 1 ? -Math.sign(row[0].cx || 1) * 2.6 : 0);
+        return;  // a bad door costs more than any hazard
       }
-      g.G.target = t;
+      g.G.target = avoid(g, t);
     },
   };
-  window.sim = { g, errors, seeded, run, fingerprint, pilots, gateValue };
+  window.sim = { g, errors, seeded, run, fingerprint, pilots, gateValue, avoid };
 })();
