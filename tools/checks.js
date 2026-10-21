@@ -131,3 +131,70 @@
   }
   window.checks = { steps, fresh, lost, hold, calm, noFire, hazards, gauntlet, gauntletPilot };
 })();
+(() => {
+  const g = window.__game, { steps, fresh, noFire } = window.checks;
+  // takes a heater door when heat is under 45, otherwise the other door, and grabs heat pickups
+  const whiteoutPilot = g => {
+    window.sim.pilots.classic(g);
+    const row = g.gates.filter(x => !x.done && x.z > -12 && x.z < 1), heater = row.find(x => x.op === 'heat');
+    if (heater) { const other = row.find(x => x !== heater); g.G.target = g.G.heat < 45 || !other ? heater.cx : other.cx; }
+    const camp = g.barrels.find(b => b.reward === 'HEAT' && b.z > -30 && b.z < -10);
+    if (camp && g.G.heat < 75 && !row.length && !g.enemies.some(e => e.z > -24)) g.G.target = window.sim.avoid(g, camp.x);
+    const fire = g.pickups.find(p => p.kind === 'HEAT' && p.z > -16);
+    if (fire) g.G.target = fire.x;
+  };
+  // the same run without the classic pilot's crew refill, against Classic on the same seeds
+  function whiteoutSurvival(seeds = [3, 4, 5, 6, 7, 8]) {
+    const out = [];
+    for (const modeKey of ['whiteout', 'classic']) for (const seed of seeds) window.sim.seeded(seed, () => {
+      g.start(modeKey); let zero = 0, heaters = 0, fires = 0; const seen = new Set();
+      for (let i = 0; i < 40000 && !g.G.over; i += 2) {
+        const add = g.addUnits; g.addUnits = () => 0; (modeKey === 'whiteout' ? whiteoutPilot : window.sim.pilots.classic)(g); g.addUnits = add;
+        g.step(2); if (g.G.heat <= 0) zero += 1 / 60;
+        for (const x of g.gates) if (x.op === 'heat' && x.pulse > 0.9 && !seen.has(x)) { seen.add(x); heaters++; }
+      }
+      out.push(`${modeKey} seed ${seed}: ${Math.round(g.G.dist)} m, ${Math.round(g.G.time / 2)} s, peak ${g.G.peak}${modeKey === 'whiteout' ? `, heaters ${heaters}, ${zero.toFixed(0)} s at zero heat` : ''}, ${document.getElementById('endTitle').textContent}`);
+    });
+    return out;
+  }
+  function whiteout() {
+    const r = {};
+    fresh('whiteout', 20);
+    const h0 = g.G.heat; steps(600); r.drainPerRealSec = +((h0 - g.G.heat) / (600 / 60 / 2)).toFixed(2);
+    g.G.heat = 0.01; const n0 = g.units.length; steps(240, () => { if (g.units.length < 10) g.addUnits(10); });
+    r.frozenIn2RealSec = n0 - g.units.length; r.statues = g.hazards.filter(h => h.kind === 'statue').length;
+    fresh('whiteout', 20); g.G.target = 0; steps(60);
+    const st = g.spawnHazard('statue', { mesh: new THREE.Mesh(), x: 0, z: -6 });
+    let leak = 0, near = 0; const before = new WeakSet();
+    steps(200, () => {
+      st.z = -6; st.t = 0; g.G.heat = 100;
+      for (const b of g.bullets) if (Math.abs(b.x) < 0.15 && Math.abs(b.vx) < 0.01) {
+        if (b.z > -5.4 && !before.has(b)) { before.add(b); near++; } else if (b.z < -6.6 && before.has(b)) { before.delete(b); leak++; }
+      }
+    });
+    r.statueShotsPast = leak; r.statueShotsAimed = near;
+    steps(400); r.statuesAfter4RealSec = g.hazards.filter(h => h.kind === 'statue').length;
+    fresh('whiteout', 20); g.G.heat = 30;
+    const row = g.G.rowId + 1;
+    g.G.heaterT = 0;
+    for (let i = 0; i < 20 && !g.gates.some(x => x.op === 'heat'); i++) { g.G.nextAt = g.G.dist; steps(1); for (const e of g.enemies) e.z = -1000; }
+    const heaterGate = g.gates.find(x => x.op === 'heat');
+    r.heaterSpawned = !!heaterGate;
+    if (heaterGate) {
+      const before = g.G.heat; let after = null;
+      steps(2400, () => { g.G.nextAt = 1e9; g.G.target = heaterGate.cx; if (heaterGate.done && after === null) after = g.G.heat; });
+      r.heaterValueAtPass = heaterGate.value; r.heatBeforeHeater = +before.toFixed(1); r.heatAfterHeater = after && +after.toFixed(1);
+    }
+    r.runs = [];
+    for (const seed of [3, 4, 5]) {
+      window.sim.seeded(seed, () => { g.start('whiteout'); let minHeat = 100, frozen = 0, heaters = 0; const seen = new Set();
+        for (let i = 0; i < 40000 && !g.G.over; i += 2) { whiteoutPilot(g); g.step(2); minHeat = Math.min(minHeat, g.G.heat);
+          for (const h of g.hazards) if (h.kind === 'statue' && !seen.has(h)) { seen.add(h); frozen++; }
+          for (const x of g.gates) if (x.op === 'heat' && x.pulse > 0.9 && !seen.has(x)) { seen.add(x); heaters++; } }
+        r.runs.push(`seed ${seed}: ${Math.round(g.G.dist)} m, ${Math.round(g.G.time / 2)} s, heaters taken ${heaters}, frozen ${frozen}, end "${document.getElementById('endTitle').textContent}"`); });
+    }
+    r.errors = window.sim.errors.length;
+    return r;
+  }
+  Object.assign(window.checks, { whiteout, whiteoutPilot, whiteoutSurvival });
+})();

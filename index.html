@@ -42,6 +42,13 @@ body {
 .stat span { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); }
 .stat.right { text-align: right; }
 
+.meter {
+  position: fixed; left: 50%; transform: translateX(-50%); top: calc(64px + env(safe-area-inset-top, 0px)); width: min(60vw, 280px);
+  background: var(--panel); border-radius: 10px; padding: 6px 10px 8px; display: grid; gap: 5px; pointer-events: none;
+}
+.meter span { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); text-align: center; }
+.meter i { display: block; height: 10px; border-radius: 5px; background: rgba(255, 255, 255, 0.14); overflow: hidden; }
+.meter b { display: block; height: 100%; border-radius: 5px; transition: width .15s linear; }
 #toasts { position: fixed; left: 0; right: 0; top: 30%; display: grid; justify-items: center; gap: 6px; pointer-events: none; }
 .toast {
   font-family: var(--display); font-size: clamp(20px, 5vw, 34px); color: var(--paper);
@@ -88,6 +95,7 @@ button.go.big { grid-column: 1 / -1; font-size: 28px; padding-block: 18px; }
   <div class="stat"><b id="hudUnits">1</b><span id="hudWeapon">Crew · Pistol</span></div>
   <div class="stat right"><b id="hudDist">0 m</b><span id="hudKills">0 down</span></div>
 </div>
+<div class="meter" id="meter" hidden><span id="meterLabel"></span><i><b id="meterFill"></b></i></div>
 <div id="toasts"></div>
 
 <div class="modal" id="startModal">
@@ -168,6 +176,7 @@ const REWARDS = {
   UNITS:  { label: '+5 CREW',   color: '#f5f7f9', cap: () => true },
   WEAPON: { label: 'WEAPON', color: '#56683a', cap: s => s.weapon < WEAPONS.length - 1 },
   BREAKER: { label: 'BOSS BREAKER', color: '#ffc83d', cap: () => false },  // only from armored-boss rolls
+  HEAT:   { label: '+60 HEAT',   color: '#ff7a00', cap: () => false },  // only from Whiteout campfires
   SPIKE:  { label: 'SPIKE SHOT', color: '#e8343b', shape: 'spike', cap: s => s.spike < 4 },
   BOMB:   { label: 'BOMB SHOT',  color: '#ff7a00', shape: 'bomb',  cap: s => s.bomb < 4 },
   RING:   { label: 'RING SHOT',  color: '#19c3d8', shape: 'ring',  cap: s => s.ring < 4 },
@@ -315,6 +324,11 @@ laneDecor.add(conveyor);
 laneDecor.visible = false;
 scene.add(laneDecor);
 
+const snow = new THREE.Points(new THREE.BufferGeometry(), new THREE.PointsMaterial({ color: 0xffffff, size: 0.12, transparent: true, opacity: 0.85, depthWrite: false }));
+snow.geometry.setAttribute('position', new THREE.Float32BufferAttribute(Array.from({ length: 600 * 3 }, (_, i) => (i % 3 === 0 ? (Math.random() - 0.5) * 30 : i % 3 === 1 ? Math.random() * 14 : -60 + Math.random() * 72)), 3));
+snow.visible = false;
+scene.add(snow);
+
 // ---------- canvas labels ----------
 function canvasTex(w, h) {
   const c = document.createElement('canvas'); c.width = w; c.height = h;
@@ -402,11 +416,15 @@ function resetGame(mode = 'classic') {
         upgradeRows: 0, bossDue: false, bosses: 0, rolls: 0, rollsBroken: 0, rollCooldown: 10,  // first roll shows up once the crew has had time to grow
         nextPad: 0, slots: [], compactT: 0, bossKills: 0, boostT: 0, reserve: 0, endWhy: null, endT: 0 };
   defenseLine.position.z = LINE_Z;
-  laneDecor.visible = MODES[mode].walledLanes;
+  const M = MODES[mode];
+  laneDecor.visible = M.walledLanes;
+  scene.background.set(M.theme.sky); scene.fog.color.set(M.theme.sky); deck.material.color.set(M.theme.deck);
+  snow.visible = !!M.theme.snow;
+  unitMat.color.set(0xffffff);
   Object.assign(stats, { multi: 1, size: 0, diag: 0, rate: 0, dmg: BASE_DMG, spike: 0, bomb: 0, ring: 0, star: 0, weapon: 0 });
   units = []; enemies = []; bullets = []; barrels = []; gates = []; pickups = []; dying = []; pads = []; hazards = [];
   addUnits(1);
-  MODES[mode].setup();
+  M.setup();
   drawCrowdLabel(crewCount());
 }
 function removeObj(o) {
@@ -448,12 +466,16 @@ function addUnits(n) {
   G.peak = Math.max(G.peak, crewCount());
   return mode().uncapped ? n : add;
 }
-function killUnit(u) {
+function dropUnit(u) {
   const i = units.indexOf(u);
-  if (i < 0) return;
+  if (i < 0) return false;
   units.splice(i, 1);
   G.slots[u.slot] = null;  // survivors hold their spots; the crowd closes gaps gradually in update()
   while (G.slots.length && !G.slots[G.slots.length - 1]) G.slots.pop();
+  return true;
+}
+function killUnit(u) {
+  if (!dropUnit(u)) return;
   dieAnim(u.mesh, Math.random() < 0.5 ? -1 : 1);
   if (G.reserve > 0) { G.reserve--; addUnits(1); }
 }
@@ -638,18 +660,57 @@ function spawnGate(side, z, value, rowId, op = '+', slide = null) {
   return g;
 }
 const crowdIn = g => G.crowdX >= g.x0 && G.crowdX < g.x1;
+const GATE_TONE = { up: 'rgba(47,140,255,0.72)', times: 'rgba(124,77,255,0.75)', down: 'rgba(232,52,59,0.72)', flat: 'rgba(150,160,170,0.6)', heat: 'rgba(255,122,0,0.8)' };
+// each door kind: shots needed per step, what a step does, how it reads, and what walking through does
+const GATE_OPS = {
+  '+': {
+    cost: GATE_BULLETS,
+    up: v => v + 1,
+    text: v => (v > 0 ? '+' : '') + v,
+    tone: v => (v > 0 ? GATE_TONE.up : v < 0 ? GATE_TONE.down : GATE_TONE.flat),
+    apply(v) {
+      if (v > 0) { const n = addUnits(v); if (n) toast(`+${n} crew`, '#2f8cff'); }
+      else if (v < 0) { const n = Math.min(crewCount(), -v); removeUnits(n); toast(`−${n} crew`, '#e8343b'); }
+    },
+  },
+  x: {
+    cost: GATE_BULLETS * 2,
+    up: v => Math.min(FACTORS.length - 1, v + 1),
+    text: v => factorLabel(FACTORS[v]),
+    tone: v => (FACTORS[v] > 1 ? GATE_TONE.times : FACTORS[v] < 1 ? GATE_TONE.down : GATE_TONE.flat),
+    apply(v) {
+      const f = FACTORS[v], n0 = crewCount(), diff = Math.round(n0 * f) - n0;
+      if (diff > 0) addUnits(diff); else if (diff < 0) removeUnits(Math.min(n0, -diff));
+      toast(`${factorLabel(f)} → ${diff >= 0 ? '+' : '−'}${Math.abs(diff)} crew`, diff >= 0 ? '#7c4dff' : '#e8343b');
+    },
+  },
+  heat: {  // Whiteout heaters: refill the heat bar instead of the crew
+    cost: GATE_BULLETS,
+    up: v => v + 5,
+    text: v => `+${v}`,
+    tone: () => GATE_TONE.heat,
+    icon: (ctx, x, y) => flameIcon(ctx, x, y, 34),
+    apply(v) { G.heat = Math.min(HEAT_MAX, G.heat + v); toast(`+${v} heat`, '#ff7a00'); },
+  },
+};
+function flameIcon(ctx, x, y, r) {
+  ctx.fillStyle = '#ffd23d'; ctx.strokeStyle = 'rgba(18,22,29,0.8)'; ctx.lineWidth = 6;
+  ctx.beginPath(); ctx.moveTo(x, y - r * 1.3);
+  ctx.bezierCurveTo(x + r * 0.9, y - r * 0.3, x + r, y + r * 0.5, x, y + r);
+  ctx.bezierCurveTo(x - r, y + r * 0.5, x - r * 0.9, y - r * 0.3, x, y - r * 1.3);
+  ctx.stroke(); ctx.fill();
+}
 function drawGate(g) {
-  const { ctx, c, tex } = g.lbl;
+  const { ctx, c, tex } = g.lbl, O = GATE_OPS[g.op];
   ctx.clearRect(0, 0, c.width, c.height);
-  const f = g.op === 'x' ? FACTORS[g.value] : 0;
-  const good = g.op === 'x' ? f > 1 : g.value > 0, bad = g.op === 'x' ? f < 1 : g.value < 0;
-  ctx.fillStyle = good ? (g.op === 'x' ? 'rgba(124,77,255,0.75)' : 'rgba(47,140,255,0.72)') : bad ? 'rgba(232,52,59,0.72)' : 'rgba(150,160,170,0.6)';
+  ctx.fillStyle = O.tone(g.value);
   ctx.fillRect(0, 0, c.width, c.height);
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  const t = g.op === 'x' ? factorLabel(f) : (g.value > 0 ? '+' : '') + g.value;
-  fitFont(ctx, t, c.width - 40, 96, FONT);
-  ctx.lineWidth = 8; ctx.strokeStyle = 'rgba(18,22,29,0.8)'; ctx.strokeText(t, c.width / 2, c.height / 2 - 6);
-  ctx.fillStyle = '#fff'; ctx.fillText(t, c.width / 2, c.height / 2 - 6);
+  const t = O.text(g.value), tx = O.icon ? c.width / 2 + 30 : c.width / 2;
+  fitFont(ctx, t, c.width - (O.icon ? 120 : 40), 96, FONT);
+  ctx.lineWidth = 8; ctx.strokeStyle = 'rgba(18,22,29,0.8)'; ctx.strokeText(t, tx, c.height / 2 - 6);
+  ctx.fillStyle = '#fff'; ctx.fillText(t, tx, c.height / 2 - 6);
+  if (O.icon) O.icon(ctx, tx - ctx.measureText(t).width / 2 - 42, c.height / 2 - 6);
   ctx.fillStyle = 'rgba(18,22,29,0.55)'; roundRect(ctx, 24, c.height - 30, c.width - 48, 14, 7); ctx.fill();
   if (g.prog > 0) { ctx.fillStyle = '#ffffff'; roundRect(ctx, 24, c.height - 30, Math.max(14, (c.width - 48) * g.prog / gateCost(g)), 14, 7); ctx.fill(); }
   tex.needsUpdate = true;
@@ -659,18 +720,7 @@ const gateCost = g => mode().gateCost(g);
 function applyGate(g) {
   for (const o of gates) if (o.rowId === g.rowId) o.done = true;
   g.pulse = 1;
-  if (g.op === 'x') {
-    const f = FACTORS[g.value], n0 = crewCount(), diff = Math.round(n0 * f) - n0;
-    if (diff > 0) addUnits(diff); else if (diff < 0) removeUnits(Math.min(n0, -diff));
-    toast(`${factorLabel(f)} → ${diff >= 0 ? '+' : '−'}${Math.abs(diff)} crew`, diff >= 0 ? '#7c4dff' : '#e8343b');
-  } else if (g.value > 0) {
-    const n = addUnits(g.value);
-    if (n) toast(`+${n} crew`, '#2f8cff');
-  } else if (g.value < 0) {
-    const n = Math.min(crewCount(), -g.value);
-    removeUnits(n);
-    toast(`−${n} crew`, '#e8343b');
-  }
+  GATE_OPS[g.op].apply(g.value);
 }
 
 // ---------- pickups ----------
@@ -715,6 +765,7 @@ function applyReward(kind, amount) {
     case 'UNITS': addUnits(amount); break;
     case 'BREAKER': G.breaker = true; break;
     case 'WEAPON': stats.weapon = Math.min(WEAPONS.length - 1, stats.weapon + 1); break;
+    case 'HEAT': G.heat = Math.min(HEAT_MAX, G.heat + 60); break;
   }
   toast(label, REWARDS[kind].color);
   for (const b of barrels) b.dirty = true;
@@ -859,6 +910,8 @@ const turretBaseGeo = new THREE.CylinderGeometry(0.45, 0.6, 0.7, 12), turretHead
 const flashGeo = new THREE.SphereGeometry(0.22, 10, 8), flashMat = new THREE.MeshBasicMaterial({ color: 0xffd23d }), boltMat = new THREE.MeshBasicMaterial({ color: 0xff3030 });
 const LAVA_CREEP = 0.08, LAVA_PUSH = 2.5, LAVA_LIFE = 25 * SEC, LAVA_DAM_EVERY = 6 * SEC, DAM_TAG = { label: 'DAM', color: '#2f8cff', ink: '#ffffff' };
 const lavaMat = new THREE.MeshBasicMaterial({ color: 0xff5a1a, transparent: true, opacity: 0.85, depthWrite: false });
+const STATUE_T = 3 * SEC, iceBlockGeo = new THREE.BoxGeometry(0.62, 1.1, 0.62);
+const iceMat = animeMaterial(0x9fd4ff), iceShellMat = new THREE.MeshLambertMaterial({ color: 0xcfeeff, transparent: true, opacity: 0.45, depthWrite: false });
 const BOOST_T = 5 * SEC, speedMat = (() => {
   const { c, ctx, tex } = canvasTex(128, 64);
   ctx.fillStyle = 'rgba(47,140,255,0.8)'; ctx.fillRect(0, 0, 128, 64);
@@ -1068,6 +1121,19 @@ const HAZARDS = {
       HAZARDS.lava.spawn();
       toast('Lava rising · break the dams', '#ff7a00');
     },
+  },
+  statue: {  // a Whiteout crew member frozen solid: it soaks shots for a few seconds, then shatters
+    spawn(u) {
+      const group = new THREE.Group();
+      scene.remove(u.mesh); u.mesh.position.set(0, 0, 0); u.mesh.material = iceMat; group.add(u.mesh);
+      const block = new THREE.Mesh(iceBlockGeo, iceShellMat); block.position.y = 0.55; group.add(block);
+      return addHazard('statue', group, u.x, u.z, {});
+    },
+    update(h, dt, scroll) {
+      drift(h, dt, scroll);
+      if (h.t > STATUE_T) { h.gone = true; burst(h.x, h.z, 0xbfe6ff); }
+    },
+    blocksShot: (h, b) => Math.abs(b.x - h.x) < 0.35 + b.r && Math.abs(b.z - h.z) < 0.4,
   },
   speed: {  // a chevron strip; crossing it speeds the scroll up for a few seconds
     spawn(x0, x1, z) {
@@ -1446,6 +1512,45 @@ function gauntletDirector(dt) {
   }
 }
 
+// ---------- whiteout: classic under a heat bar that the crowd has to keep topped up ----------
+const HEAT_MAX = 100, HEATER = 40;
+const heatDrain = () => (4 + 2 * Math.min(1, G.dist / 1000)) * (1 + 0.01 * crewCount() / 10) / SEC;
+// The plan's 25-35 s spacing froze every crew within 40 s of the start, and break-even spacing (10 s) left no room to skip
+// one for crew; at 6-9 s most door rows carry a heater, so taking every other one keeps a crowd warm.
+const heaterGap = () => (6 + 3 * Math.min(1, G.dist / 1000)) * SEC;
+// Heaters ride on Classic's own rows: the worse door of a gate row turns into a heater, or the harder barrel into a campfire.
+function whiteoutDirector() {
+  while (G.dist >= G.nextAt) {
+    const ev = nextEvent(), g0 = gates.length, b0 = barrels.length;
+    runEvent(ev);
+    G.nextAt += ev.gap;
+    if (G.time >= G.heaterT && warmRow(gates.slice(g0), barrels.slice(b0))) G.heaterT = G.time + heaterGap();
+  }
+}
+function warmRow(gs, bs) {
+  if (bs.length) {
+    const b = bs.reduce((a, o) => (o.hits > a.hits ? o : a));
+    scene.remove(b.group); barrels.splice(barrels.indexOf(b), 1);
+    spawnBarrel(Math.sign(b.x), b.z, breakableHits(0.8), 'HEAT', false);
+    return true;
+  }
+  if (!gs.length || gs.some(g => g.vx)) return false;
+  if (gs.length === 1) { spawnGate(-gs[0].side, gs[0].z, HEATER, gs[0].rowId, 'heat'); return true; }
+  const worse = gs.reduce((a, o) => (throughDoor(crewCount(), o) < throughDoor(crewCount(), a) ? o : a));
+  Object.assign(worse, { op: 'heat', value: HEATER, prog: 0, dirty: true });
+  return true;
+}
+// at zero heat the outermost crew member freezes every half second
+function whiteoutUpdate(dt) {
+  G.heat = Math.max(0, G.heat - heatDrain() * dt);
+  unitMat.color.setRGB(0.45 + 0.55 * G.heat / HEAT_MAX, 0.7 + 0.3 * G.heat / HEAT_MAX, 1);
+  if (G.heat > 0) { G.freezeT = 0; return; }
+  if ((G.freezeT -= dt) > 0 || !units.length) return;
+  G.freezeT = 0.5 * SEC;
+  const u = units.reduce((a, o) => ((o.x - G.crowdX) ** 2 + (o.z - G.crowdZ) ** 2 > (a.x - G.crowdX) ** 2 + (a.z - G.crowdZ) ** 2 ? o : a));
+  if (dropUnit(u)) HAZARDS.statue.spawn(u);
+}
+
 // ---------- modes: each entry owns how its run differs from the shared engine ----------
 function classicDirector() {
   while (G.dist >= G.nextAt) { const ev = nextEvent(); runEvent(ev); G.nextAt += ev.gap; }
@@ -1469,10 +1574,13 @@ const MODE_BASE = {
   score: () => ({ n: Math.floor(G.dist), text: String(Math.floor(G.dist)), label: 'Metres' }),
   endStats: s => [[s.text, s.label], [G.kills, 'Enemies'], [G.peak, 'Peak crew']],
   endText: why => END[why],
-  gateCost: g => (g.op === 'x' ? GATE_BULLETS * 2 : GATE_BULLETS),
+  gateCost: g => GATE_OPS[g.op].cost,
   again: () => ['Run it back', false],
   uncapped: false,
   setup() {},
+  update() {},
+  meter: () => null,
+  theme: { sky: SKY, deck: 0x7885a6 },
 };
 const MODES = {
   classic: { label: 'Classic', director: classicDirector },
@@ -1488,6 +1596,15 @@ const MODES = {
     director: lanesDirector,
     score: () => ({ n: G.bossKills, text: `${G.bossKills}/${LANE_BOSS_HP.length}`, label: 'Bosses' }),
     endText: why => (why === 'win' ? ['Bridge held', 'All three bosses are down.'] : END[why]),
+  },
+  whiteout: {
+    label: 'Whiteout',
+    theme: { sky: 0xdde6f0, deck: 0xe6edf5, snow: true },
+    setup() { G.heat = HEAT_MAX; G.heaterT = 4 * SEC; G.freezeT = 0; },
+    director: whiteoutDirector,
+    update: whiteoutUpdate,
+    meter: () => ({ label: G.heat > 0 ? 'Heat' : 'Freezing', frac: G.heat / HEAT_MAX, color: G.heat < 25 ? '#e8343b' : '#ff7a00' }),
+    endText: why => (why === 'crew' && G.heat <= 0 ? ['Frozen solid', 'The cold took the last of your crew.'] : END[why]),
   },
   gauntlet: {
     label: 'Door Gauntlet',
@@ -1521,6 +1638,7 @@ function update(dt) {
   G.dist += scroll * dt;
   const M = mode();
   M.director(dt);
+  M.update(dt);
 
   // crowd
   if (input.left) G.target -= 3 * dt;
@@ -1700,7 +1818,7 @@ function update(dt) {
     if (!dead) for (const g of gates) {
       if (g.done) continue;
       if (oz - g.pz > 0 && b.z - g.z <= 0 && b.x >= g.x0 && b.x <= g.x1) {
-        if (++g.prog >= gateCost(g)) { g.prog = 0; g.value = g.op === 'x' ? Math.min(FACTORS.length - 1, g.value + 1) : g.value + 1; g.pulse = 0.5; }
+        if (++g.prog >= gateCost(g)) { g.prog = 0; g.value = GATE_OPS[g.op].up(g.value); g.pulse = 0.5; }
         g.dirty = true; dead = true; break;
       }
     }
@@ -1742,6 +1860,15 @@ function animate(dt) {
   if (running) {
     const scroll = scrollNow();
     for (const mv of movers) { mv.m.position.z += scroll * dt; if (mv.m.position.z > 22) mv.m.position.z -= mv.wrap; }
+  }
+  if (snow.visible) {
+    const p = snow.geometry.attributes.position, a = p.array, sz = running ? scrollNow() : 0, now = performance.now() / 1000;
+    for (let i = 0; i < a.length; i += 3) {
+      a[i + 1] -= dt * 1.6; a[i + 2] += sz * dt; a[i] += Math.sin(now * 0.7 + i) * dt * 0.3;
+      if (a[i + 1] < 0) a[i + 1] += 14;
+      if (a[i + 2] > 12) a[i + 2] -= 72;
+    }
+    p.needsUpdate = true;
   }
   // bullets → instances, one instanced mesh per shape
   const t = performance.now() / 1000;
@@ -1796,10 +1923,12 @@ function toast(text, color) {
 }
 let lastHud = '';
 function hud() {
-  const [big, small] = mode().hud();
-  const s = `${crewCount()}|${big}|${small}|${stats.weapon}`;
+  const [big, small] = mode().hud(), m = mode().meter();
+  const s = `${crewCount()}|${big}|${small}|${stats.weapon}|${m ? `${m.label}|${Math.round(m.frac * 100)}|${m.color}` : ''}`;
   if (s === lastHud) return;
   lastHud = s;
+  $('meter').hidden = !m;
+  if (m) { $('meterLabel').textContent = m.label; $('meterFill').style.width = `${Math.max(0, Math.min(1, m.frac)) * 100}%`; $('meterFill').style.background = m.color; }
   $('hudUnits').textContent = crewCount();
   $('hudDist').textContent = big;
   $('hudKills').textContent = small;
@@ -1822,7 +1951,7 @@ function gameOver(why) {
   if (s.n > (readBest(G.mode)?.n ?? -Infinity)) writeBest(G.mode, s);
   const shapes = SHAPE_KEYS.filter(k => stats[k] > 0).map(k => `${k} ${stats[k]}`);
   $('endBuild').textContent = `Build: ${weapon().name} · ${stats.multi} shot · ${stats.diag} diagonal · size ${stats.size} · rate ${stats.rate} · ${stats.dmg} dmg` + (shapes.length ? ` · ${shapes.join(' · ')}` : '');
-  $('hud').hidden = true;
+  $('hud').hidden = true; $('meter').hidden = true;
   $('endModal').hidden = false;
   $('againBtn').focus();
 }
