@@ -198,3 +198,53 @@
   }
   Object.assign(window.checks, { whiteout, whiteoutPilot, whiteoutSurvival });
 })();
+(() => {
+  const g = window.__game, { steps } = window.checks;
+  // aims at the nearest enemy, takes the bigger door or shoots the left reward barrel during calms, grabs pickups
+  const wallPilot = g => {
+    const e = g.enemies.slice().sort((a, b) => b.z - a.z)[0];
+    const pk = g.pickups[0], row = g.gates.filter(x => !x.done), bar = g.barrels.find(b => b.pair);
+    let t = 0;
+    if (e) t = e.x; else if (pk) t = pk.x; else if (row.length) t = row.reduce((a, x) => (window.sim.gateValue(x) > window.sim.gateValue(a) ? x : a)).cx; else if (bar) t = bar.x;
+    g.G.target = window.sim.avoid(g, t);
+  };
+  function wall() {
+    const r = { runs: [] };
+    for (const seed of [1, 2, 3]) window.sim.seeded(seed, () => {
+      g.start('wall');
+      const log = { wallHits: 0, rewardRows: 0, rewardTaken: 0, vanished: 0, bosses: 0, waveAt: [] };
+      let hp = g.G.wallHp, wave = 0; const seen = new Set();
+      for (let i = 0; i < 60000 && !g.G.over; i += 2) {
+        wallPilot(g); g.step(2);
+        if (g.G.wallHp < hp) log.wallHits++;
+        hp = g.G.wallHp;
+        if (g.G.wave !== wave) { wave = g.G.wave; log.waveAt.push(Math.round(g.G.time / 2)); }
+        for (const b of g.barrels) if (b.pair && !seen.has(b)) { seen.add(b); if (!seen.has('row' + b.pair)) { seen.add('row' + b.pair); log.rewardRows++; } }
+        for (const x of g.gates) if (x.vz && !seen.has(x)) { seen.add(x); if (!seen.has('row' + x.rowId)) { seen.add('row' + x.rowId); log.rewardRows++; } }
+        for (const x of g.enemies) if (x.boss && !seen.has(x)) { seen.add(x); log.bosses++; }
+      }
+      r.runs.push({ seed, waves: g.G.wave, wallHp: Math.round(g.G.wallHp), crew: g.units.length, peak: g.G.peak, kills: g.G.kills, title: document.getElementById('endTitle').textContent,
+        reason: document.getElementById('endReason').textContent, score: document.getElementById('endStats').innerText.replace(/\n/g, ' '), ...log, waveAt: log.waveAt.slice(0, 8).join(',') });
+    });
+    for (const run of r.runs) { delete run.rewardTaken; delete run.vanished; }
+    g.start('wall'); steps(60);
+    const hp0 = g.G.wallHp, e = g.spawnEnemy(g.G.crowdX > 0 ? -4 : 4, 2.5, 37); e.walk = 1;
+    for (const u of g.units) u.cd = 1e9;
+    steps(120, () => { for (const u of g.units) u.cd = 1e9; });
+    r.wallHitBy37hp = hp0 - g.G.wallHp;
+    let pairRow = null;
+    for (let k = 0; k < 8 && !pairRow; k++) {
+      g.start('wall');
+      for (let i = 0; i < 6000 && g.barrels.filter(b => b.pair).length < 2 && !g.G.over; i++) { wallPilot(g); g.step(1); }
+      const mine = g.barrels.filter(b => b.pair);
+      if (mine.length !== 2) continue;
+      const [a, b] = mine, p0 = g.pickups.length;
+      steps(1500, () => { g.G.target = a.x; });
+      pairRow = { wave: g.G.wave, aBroken: !g.barrels.includes(a), partnerGone: !g.barrels.includes(b), newPickups: g.pickups.length - p0 + (g.G.over ? 0 : 0), reward: a.reward };
+    }
+    r.rewardPair = pairRow;
+    r.errors = window.sim.errors.length;
+    return r;
+  }
+  Object.assign(window.checks, { wall, wallPilot });
+})();

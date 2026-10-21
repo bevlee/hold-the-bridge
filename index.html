@@ -55,6 +55,7 @@ body {
   -webkit-text-stroke: 1.5px var(--ink); paint-order: stroke fill; text-shadow: 0 3px 0 var(--ink);
   animation: toast 1.4s ease-out forwards;
 }
+.toast.big { font-size: clamp(38px, 10vw, 64px); -webkit-text-stroke-width: 2.5px; }
 @keyframes toast { 0% { transform: translateY(14px) scale(.8); opacity: 0 } 15% { transform: none; opacity: 1 } 70% { opacity: 1 } 100% { transform: translateY(-30px); opacity: 0 } }
 @media (prefers-reduced-motion: reduce) { .toast { animation-duration: 2s; animation-name: toastFade } @keyframes toastFade { 0%,80% { opacity: 1 } 100% { opacity: 0 } } }
 
@@ -177,6 +178,7 @@ const REWARDS = {
   WEAPON: { label: 'WEAPON', color: '#56683a', cap: s => s.weapon < WEAPONS.length - 1 },
   BREAKER: { label: 'BOSS BREAKER', color: '#ffc83d', cap: () => false },  // only from armored-boss rolls
   HEAT:   { label: '+60 HEAT',   color: '#ff7a00', cap: () => false },  // only from Whiteout campfires
+  REPAIR: { label: '+200 WALL',  color: '#8a96a8', cap: () => false },  // only from Hold the Wall reward rows
   SPIKE:  { label: 'SPIKE SHOT', color: '#e8343b', shape: 'spike', cap: s => s.spike < 4 },
   BOMB:   { label: 'BOMB SHOT',  color: '#ff7a00', shape: 'bomb',  cap: s => s.bomb < 4 },
   RING:   { label: 'RING SHOT',  color: '#19c3d8', shape: 'ring',  cap: s => s.ring < 4 },
@@ -323,6 +325,16 @@ conveyor.receiveShadow = true;
 laneDecor.add(conveyor);
 laneDecor.visible = false;
 scene.add(laneDecor);
+const fortDecor = new THREE.Group();  // Hold the Wall: a low battlement right behind the crew
+{
+  const stone = new THREE.MeshLambertMaterial({ color: 0x8d97ab });
+  const base = new THREE.Mesh(new THREE.BoxGeometry(HALF_W * 2 + 1, 1, 0.8), stone); base.position.set(0, 0.5, LINE_Z + 0.6); fortDecor.add(base);
+  for (let i = 0; i < 9; i++) { const m = new THREE.Mesh(new THREE.BoxGeometry(0.75, 0.5, 0.8), stone); m.position.set(-HALF_W + 0.4 + i * (HALF_W * 2 - 0.8) / 8, 1.25, LINE_Z + 0.6); fortDecor.add(m); }
+  shade(fortDecor);
+  fortDecor.visible = false;
+  scene.add(fortDecor);
+}
+const DECOR = [laneDecor, fortDecor];
 
 const snow = new THREE.Points(new THREE.BufferGeometry(), new THREE.PointsMaterial({ color: 0xffffff, size: 0.12, transparent: true, opacity: 0.85, depthWrite: false }));
 snow.geometry.setAttribute('position', new THREE.Float32BufferAttribute(Array.from({ length: 600 * 3 }, (_, i) => (i % 3 === 0 ? (Math.random() - 0.5) * 30 : i % 3 === 1 ? Math.random() * 14 : -60 + Math.random() * 72)), 3));
@@ -417,7 +429,7 @@ function resetGame(mode = 'classic') {
         nextPad: 0, slots: [], compactT: 0, bossKills: 0, boostT: 0, reserve: 0, endWhy: null, endT: 0 };
   defenseLine.position.z = LINE_Z;
   const M = MODES[mode];
-  laneDecor.visible = M.walledLanes;
+  for (const d of DECOR) d.visible = M.decor === d;
   scene.background.set(M.theme.sky); scene.fog.color.set(M.theme.sky); deck.material.color.set(M.theme.deck);
   snow.visible = !!M.theme.snow;
   unitMat.color.set(0xffffff);
@@ -598,7 +610,7 @@ function spawnBarrel(side, z, hits, reward, impossible) {
   const x = side * HALF_W / 2;
   group.position.set(x, 0, z);
   scene.add(group);
-  const b = { group, body, x, z, hits, reward, amount: reward === 'UNITS' ? crewBonus(prog()) : 0, impossible, lbl, shake: 0, dirty: true };
+  const b = { group, body, x, z, hits, reward, amount: reward === 'UNITS' ? crewBonus(prog()) : 0, impossible, lbl, shake: 0, dirty: true, vz: 0 };
   drawBarrel(b);
   barrels.push(b);
   return b;
@@ -627,9 +639,19 @@ function breakBarrel(b) {
   barrels.splice(i, 1);
   scene.remove(b.group);
   burst(b.x, b.z, b.roll ? 0xf7f7f2 : b.impossible ? 0x3b4048 : 0xc8462a);
-  if (b.reward) spawnPickup(b.x, b.z, b.reward, b.amount);
+  if (b.reward) spawnPickup(b.x, b.z, b.reward, b.amount, b.vz);
+  if (b.pair) for (const o of barrels.slice()) if (o.pair === b.pair) vanish(o);
   if (b.tag === DAM_TAG) for (const h of hazards) if (h.kind === 'lava') h.front = Math.min(LINE_Z, h.front + LAVA_PUSH);
   if (b.roll && b.reward !== 'BREAKER' && ++G.rollsBroken % 3 === 0 && G.bosses < LANE_BOSS_HP.length) G.breakerDue = true;
+}
+
+// a reward the crew passed up: it disappears without paying out
+function vanish(b) {
+  const i = barrels.indexOf(b);
+  if (i < 0) return;
+  barrels.splice(i, 1);
+  scene.remove(b.group);
+  burst(b.x, b.z, 0xd7dde5);
 }
 
 // ---------- gates ----------
@@ -653,7 +675,7 @@ function spawnGate(side, z, value, rowId, op = '+', slide = null) {
   const cx = slide ? slide.x : side * HALF_W / 2;
   group.position.set(cx, 0, z);
   scene.add(group);
-  const g = { group, panel, side, cx, span, x0: cx - span / 2, x1: cx + span / 2, z, pz: z, op, value, rowId, lbl, done: false, fade: 0, dirty: true, pulse: 0, prog: 0,
+  const g = { group, panel, side, cx, span, x0: cx - span / 2, x1: cx + span / 2, z, pz: z, op, value, rowId, lbl, done: false, fade: 0, dirty: true, pulse: 0, prog: 0, vz: 0,
               vx: slide ? slide.v : 0, lo: slide && slide.lo, hi: slide && slide.hi };
   drawGate(g);
   gates.push(g);
@@ -725,7 +747,7 @@ function applyGate(g) {
 
 // ---------- pickups ----------
 const pickupGeo = new THREE.OctahedronGeometry(0.55, 0);
-function spawnPickup(x, z, kind, amount) {
+function spawnPickup(x, z, kind, amount, vz = 0) {
   const group = new THREE.Group();
   const col = new THREE.Color(REWARDS[kind].color);
   const shape = REWARDS[kind].shape;
@@ -743,7 +765,7 @@ function spawnPickup(x, z, kind, amount) {
   sp.scale.set(2.2, 0.62, 1); sp.position.y = 2.0; sp.renderOrder = 9; group.add(sp);
   group.position.set(x, 0, z);
   scene.add(group);
-  pickups.push({ group, gem, x, z, kind, amount, t: 0 });
+  pickups.push({ group, gem, x, z, kind, amount, t: 0, vz });
 }
 function rewardLabel(kind, amount) {
   const R = REWARDS[kind];
@@ -766,6 +788,7 @@ function applyReward(kind, amount) {
     case 'BREAKER': G.breaker = true; break;
     case 'WEAPON': stats.weapon = Math.min(WEAPONS.length - 1, stats.weapon + 1); break;
     case 'HEAT': G.heat = Math.min(HEAT_MAX, G.heat + 60); break;
+    case 'REPAIR': G.wallHp = Math.min(WALL_HP, G.wallHp + 200); break;
   }
   toast(label, REWARDS[kind].color);
   for (const b of barrels) b.dirty = true;
@@ -793,7 +816,7 @@ function spawnRoll(x, z, hp, reward) {
   group.add(sprite);
   group.position.set(x, 0, z);
   scene.add(group);
-  const b = { group, body: paper, paper, tail, gem, x, z, hits: hp, maxHits: hp, reward, amount: 0, impossible: false, roll: true, R: ROLL_R, spin: 0.4, lbl, shake: 0, dirty: true };
+  const b = { group, body: paper, paper, tail, gem, x, z, hits: hp, maxHits: hp, reward, amount: 0, impossible: false, roll: true, R: ROLL_R, spin: 0.4, lbl, shake: 0, dirty: true, vz: 0 };
   drawBarrel(b);
   barrels.push(b);
 }
@@ -1551,6 +1574,42 @@ function whiteoutUpdate(dt) {
   if (dropUnit(u)) HAZARDS.statue.spawn(u);
 }
 
+// ---------- hold the wall: no scrolling; waves march on a wall with HP, with a reward row in each calm ----------
+const WALL_HP = 500, WALL_CALM = 6 * SEC, WALL_ROLL = 2.5, WALL_STOP = -12;
+const WALL_FORMS = {
+  spread: (i, n) => [-HALF_W + 0.6 + Math.random() * (HALF_W * 2 - 1.2), Math.random() * Math.min(10, n * 0.4)],
+  clump: (i, n, c) => [c + (Math.random() - 0.5) * 2.4, Math.random() * Math.min(6, n * 0.25)],
+  column: (i, n, c) => [c + (i % 3 - 1) * 0.9, Math.floor(i / 3) * 0.7],
+  flank: (i, n) => [(i % 2 ? -1 : 1) * (HALF_W - 1.1) + (Math.random() - 0.5) * 1.4, Math.random() * Math.min(8, n * 0.3)],
+};
+function startWave() {
+  const w = ++G.wave, n = 8 + 3 * (w - 1), hp = BASE_DMG * 1.15 ** (w - 1);
+  for (const b of barrels.slice()) if (b.pair) vanish(b);
+  for (const g of gates) if (g.vz) g.done = true;
+  G.calm = false;
+  toast(`Wave ${w}`, '#ffc83d', true);
+  const keys = Object.keys(WALL_FORMS), form = WALL_FORMS[keys[w < 3 ? 0 : rint(0, keys.length - 1)]], c = (Math.random() - 0.5) * 5;
+  for (let i = 0; i < n; i++) {
+    const [x, back] = form(i, n, c);
+    spawnEnemy(Math.max(-HALF_W + 0.45, Math.min(HALF_W - 0.45, x)), SPAWN_Z - back, Math.max(1, Math.round(hp * (0.85 + Math.random() * 0.3))));
+  }
+  if (w % 5 === 0) spawnBoss((Math.random() - 0.5) * 4);
+  if (w > 3 && Math.random() < 0.35) HAZARDS.laser.spawn(SPAWN_Z + 6, 1.2);
+}
+// two barrels or two doors roll in; take one and the other is gone
+function wallRewardRow() {
+  const z = -30, s = pickSide(), pair = ++G.rowId;
+  const roll = o => Object.assign(o, { vz: WALL_ROLL, pair });
+  if (G.wave % 5 === 0) { roll(spawnBarrel(s, z, breakableHits(0.7), 'REPAIR', false)); roll(spawnBarrel(-s, z, breakableHits(), pickReward(), false)); }
+  else if (Math.random() < 0.55) { const a = pickReward(); roll(spawnBarrel(s, z, breakableHits(0.8), a, false)); roll(spawnBarrel(-s, z, breakableHits(1.2), pickReward(a), false)); }
+  else { roll(spawnGate(s, z, Math.round(goodGateValue() * 1.5), pair)); roll(spawnGate(-s, z, FX.x2, pair, 'x')); }
+}
+function wallDirector(dt) {
+  for (const b of barrels) if (b.pair) b.z = Math.min(b.z, WALL_STOP);  // reward barrels wait just out of reach
+  if (G.calm) { if ((G.calmT -= dt) <= 0) startWave(); return; }
+  if (!enemies.length && !G.endWhy) { G.calm = true; G.calmT = WALL_CALM; wallRewardRow(); }
+}
+
 // ---------- modes: each entry owns how its run differs from the shared engine ----------
 function classicDirector() {
   while (G.dist >= G.nextAt) { const ev = nextEvent(); runEvent(ev); G.nextAt += ev.gap; }
@@ -1581,12 +1640,16 @@ const MODE_BASE = {
   update() {},
   meter: () => null,
   theme: { sky: SKY, deck: 0x7885a6 },
+  decor: null,
+  march: 0,  // how fast enemies walk on their own when the deck holds still
+  breach: () => true,  // an enemy crossed the red line; true ends the run
 };
 const MODES = {
   classic: { label: 'Classic', director: classicDirector },
   lanes: {
     label: 'Three lanes',
     walledLanes: true,
+    decor: laneDecor,
     bossGrow: 0.5,  // each lanes boss is bigger than the last
     // three-lanes mode crawls forward, so its difficulty follows elapsed time instead of distance
     scroll: () => 1 + 0.5 * (1 - Math.exp(-G.time / 300)),
@@ -1605,6 +1668,25 @@ const MODES = {
     update: whiteoutUpdate,
     meter: () => ({ label: G.heat > 0 ? 'Heat' : 'Freezing', frac: G.heat / HEAT_MAX, color: G.heat < 25 ? '#e8343b' : '#ff7a00' }),
     endText: why => (why === 'crew' && G.heat <= 0 ? ['Frozen solid', 'The cold took the last of your crew.'] : END[why]),
+  },
+  wall: {
+    label: 'Hold the Wall',
+    decor: fortDecor,
+    march: 2.2,
+    setup() { G.wave = 0; G.wallHp = WALL_HP; G.calm = true; G.calmT = 1.5 * SEC; addUnits(4); },
+    scroll: () => 0,
+    progress: () => G.wave * 40,
+    director: wallDirector,
+    breach(e) {
+      G.wallHp -= Math.max(0, e.hp);
+      killEnemy(e);
+      if (G.wallHp <= 0) { G.wallHp = 0; endRun('wall'); }
+      return false;
+    },
+    meter: () => ({ label: `Wall ${Math.ceil(G.wallHp)}`, frac: G.wallHp / WALL_HP, color: G.wallHp < WALL_HP * 0.3 ? '#e8343b' : '#43dcd0' }),
+    hud: () => [`Wave ${G.wave}`, `${G.kills} down`],
+    score: () => { const n = Math.max(0, G.calm ? G.wave : G.wave - 1); return { n, text: String(n), label: 'Waves' }; },
+    endText: why => (why === 'wall' ? ['Wall broken', `It fell during wave ${G.wave}.`] : END[why]),
   },
   gauntlet: {
     label: 'Door Gauntlet',
@@ -1679,7 +1761,7 @@ function update(dt) {
   for (let i = enemies.length - 1; i >= 0; i--) {
     const e = enemies[i];
     const pz = e.z;
-    e.z += (scroll + e.walk) * dt;
+    e.z += (scroll + M.march + e.walk) * dt;
     if (e.z > -22 && n) e.x += Math.max(-1, Math.min(1, G.crowdX - e.x)) * e.steer * dt;
     const ex = M.walledLanes && e.z < LANE_WALL_END ? LANE_EDGE - LANE_WALL_T - e.r : HALF_W - 0.35;  // walled middle lane
     e.x = Math.max(-ex, Math.min(ex, e.x));
@@ -1710,13 +1792,13 @@ function update(dt) {
         if (e.hp <= 0) { killEnemy(e); break; }
       }
     }
-    if (enemies[i] === e && e.z > LINE_Z) return gameOver('line');
+    if (enemies[i] === e && e.z > LINE_Z && M.breach(e)) return gameOver('line');
   }
 
   // barrels
   for (let i = barrels.length - 1; i >= 0; i--) {
     const b = barrels[i];
-    b.z += scroll * dt;
+    b.z += (scroll + b.vz) * dt;
     b.shake = Math.max(0, b.shake - dt);
     b.group.position.set(b.x + (b.shake ? (Math.random() - 0.5) * 0.12 : 0), 0, b.z);
     if (b.roll) updateRoll(b, dt);
@@ -1733,7 +1815,7 @@ function update(dt) {
   for (let i = gates.length - 1; i >= 0; i--) {
     const g = gates[i];
     g.pz = g.z;
-    g.z += scroll * dt;
+    g.z += (scroll + g.vz) * dt;
     if (g.vx) {
       g.cx += g.vx * dt;
       if (g.cx < g.lo || g.cx > g.hi) { g.cx = Math.max(g.lo, Math.min(g.hi, g.cx)); g.vx = -g.vx; }
@@ -1775,7 +1857,7 @@ function update(dt) {
   // pickups
   for (let i = pickups.length - 1; i >= 0; i--) {
     const p = pickups[i];
-    p.z += scroll * (p.kind === 'BREAKER' ? 2.5 : 1) * dt; p.t += dt;
+    p.z += (scroll * (p.kind === 'BREAKER' ? 2.5 : 1) + p.vz) * dt; p.t += dt;
     p.gem.rotation.y += dt * 2.5;
     p.gem.position.y = 0.9 + Math.sin(p.t * 4) * 0.15;
     p.group.position.set(p.x, 0, p.z);
@@ -1914,9 +1996,9 @@ function animate(dt) {
 // ---------- HUD ----------
 const $ = id => document.getElementById(id);
 const toastsEl = $('toasts');
-function toast(text, color) {
+function toast(text, color, big = false) {
   const el = document.createElement('div');
-  el.className = 'toast'; el.textContent = text; el.style.color = color;
+  el.className = big ? 'toast big' : 'toast'; el.textContent = text; el.style.color = color;
   toastsEl.appendChild(el);
   setTimeout(() => el.remove(), 2000);
   while (toastsEl.children.length > 3) toastsEl.firstChild.remove();
