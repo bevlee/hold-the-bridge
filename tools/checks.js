@@ -324,3 +324,59 @@
   }
   Object.assign(window.checks, { cannon, cannonPilot });
 })();
+(() => {
+  const g = window.__game, { steps, fresh } = window.checks;
+  // shoots what is ahead, keeps the truck out of hazards and barrels, takes the better door
+  const convoyPilot = g => {
+    const e = g.enemies.filter(e => !e.chaser && !e.ride && e.z > -26).sort((a, b) => b.z - a.z)[0];
+    const block = g.hazards.find(h => h.kind === 'roadblock' && h.z > -26 && h.z < -6);
+    const bar = g.barrels.filter(b => b.z > -34 && b.z < 2);
+    const soft = bar.length && bar.reduce((a, b) => (b.hits < a.hits ? b : a));
+    let t = soft ? soft.x : block ? (block.x1 - block.x0 > 6 ? 0 : (block.x0 + block.x1) / 2) : e ? e.x : 0;
+    const row = g.gates.filter(x => !x.done && x.z > -12 && x.z < 1);
+    if (row.length) { const best = row.reduce((a, x) => (window.sim.gateValue(x) > window.sim.gateValue(a) ? x : a)); t = window.sim.gateValue(best) > 0 ? best.cx : -best.cx; }
+    const near = g.hazards.find(h => h.kind === 'roadblock' && h.z > -7 && h.x1 - h.x0 < 6);
+    if (near) t = near.x < 0 ? 2.8 : -2.8;
+    g.G.target = window.sim.avoid(g, t, -10);
+  };
+  function convoy() {
+    const r = {};
+    fresh('convoy', 8); g.G.target = 0; steps(60);
+    let hp0 = g.G.truckHp; const z = g.spawnEnemy(g.G.crowdX, -6, 10); const n0 = g.units.length;
+    steps(300, () => { for (const u of g.units) u.cd = 1e9; for (const b of g.bullets) b.life = 0; });
+    r.zombieContact = { truckDamage: hp0 - g.G.truckHp, zombieGone: !g.enemies.includes(z), crewLost: n0 - g.units.length };
+    fresh('convoy', 8); g.G.target = 0; steps(60);
+    hp0 = g.G.truckHp; let rb = g.spawnHazard('roadblock', -5, 5, -8, 999); const n1 = g.units.length;
+    steps(400, () => { for (const u of g.units) u.cd = 1e9; });
+    r.roadblockRam = { truckDamage: hp0 - g.G.truckHp, crewLost: n1 - g.units.length, smashed: rb.gone };
+    fresh('convoy', 8); g.G.target = 0; steps(60);
+    rb = g.spawnHazard('roadblock', -5, 5, -20, 25); hp0 = g.G.truckHp;
+    steps(600, () => { rb.z = Math.min(rb.z, -20); });
+    r.roadblockShot = { gone: rb.gone, truckDamage: hp0 - g.G.truckHp };
+    fresh('convoy', 8); g.G.target = 0; steps(60);
+    hp0 = g.G.truckHp; const t = g.spawnHazard('tyre', g.G.crowdX, -12, false); const n2 = g.units.length;
+    steps(400, () => { for (const u of g.units) u.cd = 1e9; });
+    r.tyre = { truckDamage: hp0 - g.G.truckHp, crewLost: n2 - g.units.length };
+    fresh('convoy', 8); g.G.target = 0; steps(60);
+    let c = g.spawnEnemy(4.6, -2, 10); c.climber = true; c.steer = 2; const n3 = g.units.length; let rode = false;
+    steps(400, () => { for (const u of g.units) u.cd = 1e9; if (c.ride) rode = true; for (const b of g.bullets) b.life = 0; });
+    r.climberUnshot = { rode, crewLost: n3 - g.units.length, climberGone: !g.enemies.includes(c) };
+    fresh('convoy', 8); g.G.target = 0; steps(60);
+    c = g.spawnEnemy(4.6, -2, 10); c.climber = true; c.steer = 2; const n4 = g.units.length; rode = false;
+    steps(400, () => { if (c.ride) rode = true; });
+    r.climberShot = { rode, crewLost: n4 - g.units.length, climberGone: !g.enemies.includes(c), kills: g.G.kills };
+    r.runs = [];
+    for (const seed of [1, 2, 3]) window.sim.seeded(seed, () => {
+      g.start('convoy'); let chasers = 0, backShots = 0, climbers = 0; const seen = new WeakSet();
+      for (let i = 0; i < 60000 && !g.G.over; i += 2) {
+        convoyPilot(g); g.step(2);
+        for (const e of g.enemies) if (!seen.has(e)) { seen.add(e); if (e.chaser) chasers++; if (e.climber) climbers++; }
+        if (g.bullets.some(b => b.vz > 0)) backShots++;
+      }
+      r.runs.push(`seed ${seed}: ${Math.round(g.G.dist)} m, ${Math.round(g.G.time / 2)} s, truck cap ${g.G.truckCap}, chasers ${chasers}, back-shot steps ${backShots}, climbers ${climbers}, peak crew ${g.G.peak}, "${document.getElementById('endTitle').textContent}" ${document.getElementById('endStats').innerText.replace(/\n/g, ' ')}`);
+    });
+    r.errors = window.sim.errors.length;
+    return r;
+  }
+  Object.assign(window.checks, { convoy, convoyPilot });
+})();

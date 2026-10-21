@@ -181,6 +181,8 @@ const REWARDS = {
   BREAKER: { label: 'BOSS BREAKER', color: '#ffc83d', cap: () => false },  // only from armored-boss rolls
   HEAT:   { label: '+60 HEAT',   color: '#ff7a00', cap: () => false },  // only from Whiteout campfires
   REPAIR: { label: '+200 WALL',  color: '#8a96a8', cap: () => false },  // only from Hold the Wall reward rows
+  TRUCK:  { label: 'BIGGER TRUCK', color: '#c46a2b', cap: () => false },  // only from Convoy supply rows
+  FUEL:   { label: '+40 FUEL',   color: '#2f9e5a', cap: () => false },
   SPIKE:  { label: 'SPIKE SHOT', color: '#e8343b', shape: 'spike', cap: s => s.spike < 4 },
   BOMB:   { label: 'BOMB SHOT',  color: '#ff7a00', shape: 'bomb',  cap: s => s.bomb < 4 },
   RING:   { label: 'RING SHOT',  color: '#19c3d8', shape: 'ring',  cap: s => s.ring < 4 },
@@ -352,7 +354,22 @@ const CANNON_BASE_Z = -46;
   cannonDecor.visible = false;
   scene.add(cannonDecor);
 }
-const DECOR = [laneDecor, fortDecor, cannonDecor];
+const truckDecor = new THREE.Group();  // Convoy: the truck the crew rides; follows the crowd
+const TRUCK_HW = 1.4, TRUCK_HL = 2.6, TRUCK_BED = 0.85;
+{
+  const body = new THREE.MeshLambertMaterial({ color: 0xc46a2b }), dark = new THREE.MeshLambertMaterial({ color: 0x2a2e35 });
+  const bed = new THREE.Mesh(new THREE.BoxGeometry(TRUCK_HW * 2, 0.35, TRUCK_HL * 2), body); bed.position.y = TRUCK_BED - 0.18; truckDecor.add(bed);
+  const cab = new THREE.Mesh(new THREE.BoxGeometry(TRUCK_HW * 2 - 0.1, 1.2, 1.3), body); cab.position.set(0, TRUCK_BED + 0.45, -TRUCK_HL - 0.55); truckDecor.add(cab);
+  const glass = new THREE.Mesh(new THREE.BoxGeometry(TRUCK_HW * 2 - 0.3, 0.5, 0.05), new THREE.MeshLambertMaterial({ color: 0x9fd4ff })); glass.position.set(0, TRUCK_BED + 0.7, -TRUCK_HL - 1.21); truckDecor.add(glass);
+  for (const s of [-1, 1]) {
+    const rail = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.35, TRUCK_HL * 2), dark); rail.position.set(s * (TRUCK_HW - 0.05), TRUCK_BED + 0.17, 0); truckDecor.add(rail);
+    for (const z of [-TRUCK_HL - 0.4, TRUCK_HL - 0.6]) { const w = new THREE.Mesh(new THREE.CylinderGeometry(0.42, 0.42, 0.35, 14), dark); w.rotation.z = Math.PI / 2; w.position.set(s * (TRUCK_HW - 0.1), 0.42, z); truckDecor.add(w); }
+  }
+  shade(truckDecor);
+  truckDecor.visible = false;
+  scene.add(truckDecor);
+}
+const DECOR = [laneDecor, fortDecor, cannonDecor, truckDecor];
 
 const snow = new THREE.Points(new THREE.BufferGeometry(), new THREE.PointsMaterial({ color: 0xffffff, size: 0.12, transparent: true, opacity: 0.85, depthWrite: false }));
 snow.geometry.setAttribute('position', new THREE.Float32BufferAttribute(Array.from({ length: 600 * 3 }, (_, i) => (i % 3 === 0 ? (Math.random() - 0.5) * 30 : i % 3 === 1 ? Math.random() * 14 : -60 + Math.random() * 72)), 3));
@@ -478,7 +495,7 @@ const firepower = () => Math.max(1, units.length) * stats.multi / fireInterval()
 // fells a drawn member takes its share of the reserve too; reserves refill the drawn crowd on the compaction tick.
 const crewCount = () => units.length + G.reserve;
 function addUnits(n) {
-  const room = MAX_UNITS - units.length;
+  const room = mode().crewCap() - units.length;
   const add = Math.min(n, room);
   for (let i = 0; i < add; i++) {
     const mesh = new THREE.Mesh(POSES[0], unitMat);
@@ -509,7 +526,8 @@ function killUnit(u) {
   if (!dropUnit(u)) return;
   dieAnim(u.mesh, Math.random() < 0.5 ? -1 : 1);
 }
-function hurtCrew(h, u) {
+const hurtCrew = (h, u) => mode().hurtCrew(h, u);
+function crewHit(h, u) {
   if (G.reserve > 0) G.reserve = Math.max(0, G.reserve - Math.round(G.reserve / units.length));
   killUnit(u);
 }
@@ -605,7 +623,7 @@ function holdBehindCover(e, pz) {
   }
   if (e.z > limit) e.z = Math.min(e.z, Math.max(limit, pz));  // stop advancing; never jump backwards
 }
-function killEnemy(e) {
+function killEnemy(e, credit = true) {
   if (e.slam) { scene.remove(e.slam.m); e.slam = null; }
   if (e.armored) G.breaker = false;  // each breaker is spent on one boss
   mode().onKill(e);
@@ -614,7 +632,7 @@ function killEnemy(e) {
   enemies.splice(i, 1);
   if (e.boss) G.bossKills++;
   if (e.bar) { scene.remove(e.bar.bg); scene.remove(e.bar.fg); }
-  G.kills++;
+  if (credit) G.kills++;
   dieAnim(e.mesh, Math.random() < 0.5 ? -1 : 1);
 }
 
@@ -810,6 +828,8 @@ function applyReward(kind, amount) {
     case 'WEAPON': stats.weapon = Math.min(WEAPONS.length - 1, stats.weapon + 1); break;
     case 'HEAT': G.heat = Math.min(HEAT_MAX, G.heat + 60); break;
     case 'REPAIR': G.wallHp = Math.min(WALL_HP, G.wallHp + 200); break;
+    case 'TRUCK': growTruck(); break;
+    case 'FUEL': G.fuel = Math.min(100, G.fuel + 40); break;
   }
   toast(label, REWARDS[kind].color);
   for (const b of barrels) b.dirty = true;
@@ -954,7 +974,7 @@ const turretBaseGeo = new THREE.CylinderGeometry(0.45, 0.6, 0.7, 12), turretHead
 const flashGeo = new THREE.SphereGeometry(0.22, 10, 8), flashMat = new THREE.MeshBasicMaterial({ color: 0xffd23d }), boltMat = new THREE.MeshBasicMaterial({ color: 0xff3030 });
 const LAVA_CREEP = 0.08, LAVA_PUSH = 2.5, LAVA_LIFE = 25 * SEC, LAVA_DAM_EVERY = 6 * SEC, DAM_TAG = { label: 'DAM', color: '#2f8cff', ink: '#ffffff' };
 const lavaMat = new THREE.MeshBasicMaterial({ color: 0xff5a1a, transparent: true, opacity: 0.85, depthWrite: false });
-const squadMat = animeMaterial(0xff9a9a);
+const squadMat = animeMaterial(0xff9a9a), wreckMat = new THREE.MeshLambertMaterial({ color: 0x6b5a4a });
 function drawSquad(h) {
   const { ctx, c, tex } = h.lbl;
   ctx.clearRect(0, 0, c.width, c.height);
@@ -1190,6 +1210,34 @@ const HAZARDS = {
     },
     blocksShot: (h, b) => Math.abs(b.x - h.x) < 0.35 + b.r && Math.abs(b.z - h.z) < 0.4,
   },
+  roadblock: {  // Convoy: a wreck or barricade across half or all of the road; shoot it apart or ram it
+    spawn(x0, x1, z, hits) {
+      const group = new THREE.Group(), w = x1 - x0, wreck = Math.random() < 0.5;
+      if (wreck) {
+        const car = new THREE.Mesh(new THREE.BoxGeometry(w - 0.4, 0.8, 1.5), wreckMat); car.position.y = 0.45; car.rotation.y = (Math.random() - 0.5) * 0.2; group.add(car);
+        const roof = new THREE.Mesh(new THREE.BoxGeometry(Math.min(2, w * 0.4), 0.55, 1.3), wreckMat); roof.position.set((Math.random() - 0.5) * (w - 2.4), 1.1, 0); group.add(roof);
+      } else for (const y of [0.35, 0.85]) { const beam = new THREE.Mesh(new THREE.BoxGeometry(w - 0.2, 0.28, 0.3), y > 0.5 ? stripeMat : hazardRedMat); beam.position.y = y; group.add(beam); }
+      const lbl = canvasTex(320, 180), sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: lbl.tex, depthTest: false }));
+      sprite.scale.set(2.6, 1.46, 1); sprite.position.y = 2.1; sprite.renderOrder = 8; group.add(sprite);
+      const h = addHazard('roadblock', group, (x0 + x1) / 2, z, { x0, x1, hits, lbl, dirty: true, shake: 0 });
+      drawBarrel(h);
+      return h;
+    },
+    update(h, dt, scroll) {
+      h.shake = Math.max(0, h.shake - dt);
+      drift(h, dt, scroll);
+      h.group.position.x = h.x + (h.shake ? (Math.random() - 0.5) * 0.12 : 0);
+      if (h.dirty) drawBarrel(h);
+    },
+    hits: (h, u) => u.x > h.x0 && u.x < h.x1 && Math.abs(u.z - h.z) < 0.9,
+    blocksShot: (h, b) => b.x > h.x0 - b.r && b.x < h.x1 + b.r && Math.abs(b.z - h.z) < 0.85,
+    onShot(h) { h.dirty = true; h.shake = 0.1; if (--h.hits <= 0) { h.gone = true; burst(h.x, h.z, 0x6b5a4a); } },
+    row(z) {
+      const full = Math.random() < 0.35, s = pickSide();
+      if (full) HAZARDS.roadblock.spawn(-HALF_W, HALF_W, z, breakableHits(1.1));
+      else HAZARDS.roadblock.spawn(s < 0 ? -HALF_W : 0, s < 0 ? 0 : HALF_W, z, breakableHits(0.8));
+    },
+  },
   squad: {  // Crowd Clash: a block of enemies under a count; touching it trades crew for squad one-for-one while the deck holds
     spawn(x0, x1, z, count, king = false) {
       const group = new THREE.Group(), w = x1 - x0, d = king ? 3 : 2.4, figs = [];
@@ -1323,14 +1371,15 @@ const CHOICES = [
 ];
 function nextEvent() {
   if (G.bossDue) { G.bossDue = false; return { t: 'boss', gap: 24 }; }
-  if (G.script < SCRIPT.length) return SCRIPT[G.script++];
+  const M = mode();
+  if (G.script < M.script.length) return M.script[G.script++];
   const d = G.dist;
   G.cycle++;
   const waveGap = Math.max(12, 22 - d / 120);
   if (G.cycle % 2 === 1) return { t: 'wave', gap: waveGap, tyres: d > 120 && Math.random() < 0.3 };
-  let r = Math.random() * CHOICES.reduce((a, c) => a + c.w, 0);
-  let c = CHOICES[0];
-  for (const ch of CHOICES) { r -= ch.w; if (r <= 0) { c = ch; break; } }
+  let r = Math.random() * M.choices.reduce((a, c) => a + c.w, 0);
+  let c = M.choices[0];
+  for (const ch of M.choices) { r -= ch.w; if (r <= 0) { c = ch; break; } }
   return { ...c, gap: 20, withWave: d > 350 && Math.random() < 0.35 };
 }
 function runEvent(ev) {
@@ -1343,7 +1392,7 @@ function runEvent(ev) {
     if (ev.kind === 'singleNeg') spawnGate(s, z, -Math.max(3, Math.round(units.length * (0.4 + Math.random() * 0.3)) + rint(1, 4)), row);
     if (ev.kind === 'goodVsFixable') { spawnGate(s, z, goodGateValue(), row); spawnGate(-s, z, -Math.max(1, Math.round(firepower() * 6 / GATE_BULLETS)), row); }
   }
-  if (ev.t === 'boss') spawnBoss((Math.random() - 0.5) * 5);
+  if (ev.t === 'boss') mode().boss();
   if (ev.t === 'hazard') HAZARDS[ev.kind].row(z);
   if (ev.tyres) for (let i = rint(1, 2); i > 0; i--) HAZARDS.tyre.spawn((Math.random() - 0.5) * 7, z + 6 - i * 4, Math.random() < 0.5);
   if (ev.t === 'gates') {
@@ -1370,6 +1419,7 @@ function runEvent(ev) {
       spawnBarrel(-s, z, impossibleBarrel(), pickReward(rw), true);
     }
     if (ev.kind === 'singleHuge') spawnBarrel(s, z, impossibleBarrel(), null, true);
+    if (ev.kind === 'supply') { spawnBarrel(s, z, breakableHits(ev.reward === 'TRUCK' ? 1.3 : 0.8), ev.reward, false); spawnBarrel(-s, z, breakableHits(), pickReward(), false); }
     if (ev.kind === 'twoBreakable') {
       const a = pickReward(), b = pickReward(a);
       spawnBarrel(s, z, breakableHits(0.8), a, false);
@@ -1412,17 +1462,17 @@ function newBullet(shape, x, z, vx, vz, r, life) {
 }
 function shoot(u) {
   if (bullets.length >= MAX_BULLETS) return;
-  const x = u.x, z = u.z - 0.35;
+  const dir = mode().fireDir(), x = u.x, z = u.z + 0.35 * dir;
   const owned = SHAPE_KEYS.filter(k => stats[k] > 0);
   const shape = owned.length ? owned[u.shot++ % owned.length] : 'orb';
   const sp = bulletSpeed(prog()) * weapon().speed, r = bulletR(), life = RANGE / sp;
   const N = stats.multi, gap = Math.max(0.2, r * 2.4);
-  for (let k = 0; k < N; k++) bullets.push(newBullet(shape, x + (k - (N - 1) / 2) * gap, z, 0, -sp, r, life));
+  for (let k = 0; k < N; k++) bullets.push(newBullet(shape, x + (k - (N - 1) / 2) * gap, z, 0, sp * dir, r, life));
   const L = stats.diag;
   for (let k = 0; k < L; k++) {
     const deg = L === 1 ? 30 : 14 + k * (30 / (L - 1));
     const a = deg * Math.PI / 180;
-    for (const s of [-1, 1]) bullets.push(newBullet(shape, x, z, s * Math.sin(a) * sp, -Math.cos(a) * sp, r, life));
+    for (const s of [-1, 1]) bullets.push(newBullet(shape, x, z, s * Math.sin(a) * sp, dir * Math.cos(a) * sp, r, life));
   }
 }
 const doomed = [];
@@ -1845,6 +1895,78 @@ function fireChampion() {
   toast('Champion!', '#7fb2ff');
 }
 
+// ---------- convoy: the crew rides a truck with HP; zombies, climbers, roadblocks and a chaser wear it down ----------
+const TRUCK_HP = 100, TRUCK_CAP = 12, FUEL_DRAIN = 1 / SEC;
+// truck damage per hazard kind; a hazard hits the truck once
+const RAM = { tyre: 25, rock: 20, spikes: 10, saw: 15, laser: 15, explosive: 20, bolt: 5, lava: 10, roadblock: 35, statue: 0, speed: 0 };
+const CONVOY_CHOICES = [
+  { t: 'gates', kind: 'goodVsImpossible', w: 3 },
+  { t: 'gates', kind: 'plusVsTimes', w: 2 },
+  { t: 'barrels', kind: 'goodVsImpossible', w: 2 },
+  { t: 'barrels', kind: 'twoBreakable', w: 2 },
+  { t: 'barrels', kind: 'supply', reward: 'TRUCK', w: 2 },
+  { t: 'barrels', kind: 'supply', reward: 'FUEL', w: 2 },
+  { t: 'hazard', kind: 'roadblock', w: 4 },
+  { t: 'hazard', kind: 'rock', w: 1 },
+  { t: 'hazard', kind: 'turret', w: 2 },
+  { t: 'hazard', kind: 'speed', w: 1 },
+];
+const CONVOY_SCRIPT = [
+  { t: 'wave', n: 3, gap: 14 },
+  { t: 'gates', kind: 'goodVsImpossible', good: 4, gap: 14 },
+  { t: 'hazard', kind: 'roadblock', gap: 16 },
+  { t: 'wave', n: 4, gap: 14 },
+  { t: 'barrels', kind: 'supply', reward: 'TRUCK', gap: 16 },
+];
+function growTruck() {
+  G.truckCap = Math.min(40, G.truckCap + 6); G.truckMax += 40; G.truckHp = Math.min(G.truckMax, G.truckHp + 40);
+  truckDecor.scale.set(1, 1, 1 + (G.truckCap - TRUCK_CAP) / 60);
+}
+const inTruck = (x, z, pad) => Math.abs(x - G.crowdX) < TRUCK_HW + pad && Math.abs(z - G.crowdZ) < TRUCK_HL + pad;
+function ram(dmg) {
+  G.truckHp = Math.max(0, G.truckHp - dmg);
+  G.truckHitT = 0.25;
+  if (G.truckHp <= 0) endRun('wreck');
+}
+function spawnChaser() {
+  const k = ++G.bosses, e = spawnEnemy(G.crowdX, LINE_Z + 7, Math.round(bossHp(k) * 0.5), true);
+  Object.assign(e, { chaser: true, slamCd: Infinity });
+  e.mesh.rotation.y = 0;
+  toast('Behind you!', '#e8343b');
+}
+function convoyUpdate(dt) {
+  truckDecor.position.set(G.crowdX, 0, G.crowdZ);
+  G.truckHitT = Math.max(0, G.truckHitT - dt);
+  truckDecor.position.y = G.truckHitT ? 0.08 * Math.sin(G.time * 80) : 0;
+  G.fuel = Math.max(0, G.fuel - FUEL_DRAIN * dt);
+  const scroll = scrollNow();
+  for (const e of enemies.slice()) {
+    if (e.chaser) { e.walk = -(scroll + 1.1); if (inTruck(e.x, e.z, e.r)) { ram(30); e.z += 7; } continue; }
+    if (e.ride) {
+      if ((e.boardT -= dt) <= 0) { if (units.length) killUnit(units[rint(0, units.length - 1)]); killEnemy(e, false); }
+      else if (units.length && Math.random() < units.length * dt / (fireInterval() * 3)) {
+        const u = units[rint(0, units.length - 1)], d = Math.hypot(e.x - u.x, e.z - u.z) || 1, sp = bulletSpeed(prog());
+        bullets.push(newBullet('orb', u.x, u.z, (e.x - u.x) / d * sp, (e.z - u.z) / d * sp, bulletR(), 1.5));
+      }
+      continue;
+    }
+    if (!inTruck(e.x, e.z, e.r)) continue;
+    if (e.climber) { e.ride = { dx: Math.sign(e.x - G.crowdX || 1) * (TRUCK_HW + 0.1), dz: (Math.random() - 0.5) * TRUCK_HL * 1.4 }; e.boardT = 2 * SEC; continue; }
+    ram(Math.min(15, 3 + e.hp / 10));
+    killEnemy(e, false);
+  }
+  for (const b of barrels.slice()) {
+    if (Math.abs(b.x - G.crowdX) < BARREL_R + TRUCK_HW && b.z > G.crowdZ - TRUCK_HL - BARREL_R && b.z < G.crowdZ + TRUCK_HL) { ram(20); vanish(b); }
+  }
+  if (G.dist > 150 && (G.climbT -= dt) <= 0) {
+    G.climbT = (6 + Math.random() * 4) * SEC;
+    for (let i = rint(1, 1 + Math.floor(G.dist / 600)); i > 0; i--) {
+      const s = pickSide(), e = spawnEnemy(s * (HALF_W - 0.4), G.crowdZ - 7 - Math.random() * 5, enemyHp(G.dist));
+      Object.assign(e, { climber: true, steer: 2 });
+    }
+  }
+}
+
 // ---------- modes: each entry owns how its run differs from the shared engine ----------
 function classicDirector() {
   while (G.dist >= G.nextAt) { const ev = nextEvent(); runEvent(ev); G.nextAt += ev.gap; }
@@ -1880,6 +2002,16 @@ const MODE_BASE = {
   decor: null,
   shooting: true,
   cover: true,  // enemies wait behind rows that block shots
+  crewContact: true,  // enemies that touch crew kill them
+  crewCap: () => MAX_UNITS,
+  crowdW: 3.6, crowdD: 0,  // half-width the crowd packs into; crowdD caps its half-depth too
+  crewY: 0,
+  steerMul: 1,
+  fireDir: () => -1,
+  hurtCrew: crewHit,
+  boss: () => spawnBoss((Math.random() - 0.5) * 5),
+  script: SCRIPT,
+  choices: CHOICES,
   march: 0,  // how fast enemies walk on their own when the deck holds still
   breach: () => true,  // an enemy crossed the red line; true ends the run
 };
@@ -1918,7 +2050,7 @@ const MODES = {
     director: wallDirector,
     breach(e) {
       G.wallHp -= Math.max(0, e.hp);
-      killEnemy(e);
+      killEnemy(e, false);
       if (G.wallHp <= 0) { G.wallHp = 0; endRun('wall'); }
       return false;
     },
@@ -1976,6 +2108,39 @@ const MODES = {
     endText: why => (why === 'win' ? ['Base destroyed', `Level ${G.level} cleared.`] : ['Cannon overrun', 'An enemy mob reached the cannon.']),
     again: why => (why === 'win' ? ['Next level', false] : ['Retry', true]),
   },
+  convoy: {
+    label: 'Convoy',
+    decor: truckDecor,
+    crewContact: false,
+    crowdW: TRUCK_HW - 0.25, crowdD: TRUCK_HL - 0.3,
+    crewY: TRUCK_BED,
+    steerMul: 0.35,
+    script: CONVOY_SCRIPT,
+    choices: CONVOY_CHOICES,
+    crewCap: () => G.truckCap,
+    setup() {
+      Object.assign(G, { truckHp: TRUCK_HP, truckMax: TRUCK_HP, truckCap: TRUCK_CAP, fuel: 100, truckHitT: 0, climbT: 4 * SEC });
+      truckDecor.scale.set(1, 1, 1);
+      addUnits(3);
+    },
+    scroll: () => scrollSpeed(G.dist) * (G.fuel > 0 ? 1 : 0.55),
+    director: classicDirector,
+    update: convoyUpdate,
+    boss: spawnChaser,
+    fireDir: () => (enemies.some(e => e.chaser) ? 1 : -1),
+    hurtCrew(h, u) {
+      if (h.kind === 'roadblock') {  // ramming a roadblock smashes it and throws off whoever stood in it
+        ram(RAM.roadblock);
+        for (const o of units.slice()) if (HAZARDS.roadblock.hits(h, o)) killUnit(o);
+        h.gone = true; burst(h.x, h.z, 0x6b5a4a);
+        return;
+      }
+      if (!h.rammed) { h.rammed = true; ram(RAM[h.kind] ?? 10); }
+    },
+    breach(e) { if (!e.chaser) killEnemy(e, false); return false; },
+    meter: () => ({ label: `Truck ${Math.ceil(G.truckHp)} · fuel ${Math.ceil(G.fuel)}%`, frac: G.truckHp / G.truckMax, color: G.truckHp < G.truckMax * 0.3 ? '#e8343b' : '#ff7a00' }),
+    endText: why => (why === 'wreck' ? ['Truck wrecked', 'The convoy stopped for good.'] : END[why]),
+  },
   gauntlet: {
     label: 'Door Gauntlet',
     uncapped: true,
@@ -2026,9 +2191,9 @@ function update(dt) {
     if (G.reserve > 0 && units.length < MAX_UNITS) { const k = Math.min(G.reserve, MAX_UNITS - units.length); G.reserve -= k; addUnits(k); }
   }
   const R = SLOT * Math.sqrt(Math.max(0, G.slots.length - 1)) + 0.25;
-  const xs = Math.min(1, 3.6 / R), zs = 1 / xs;
+  const xs = Math.min(1, M.crowdW / R), zs = M.crowdD ? Math.min(1, M.crowdD / R) : 1 / xs;
   const lim = Math.max(0, HALF_W - 0.35 - R * xs);
-  G.crowdX += (Math.max(-lim, Math.min(lim, G.target)) - G.crowdX) * Math.min(1, dt * 10 / 3);
+  G.crowdX += (Math.max(-lim, Math.min(lim, G.target)) - G.crowdX) * Math.min(1, dt * 10 / 3 * M.steerMul);
   const crowdTarget = M.walledLanes ? Math.max(0, R * zs - 2.4) : -Math.max(0, R * zs - 2.4);  // lanes: grow backwards, clear of the walls
   G.crowdZ += (crowdTarget - G.crowdZ) * Math.min(1, dt * 3);
   for (let i = 0; i < n; i++) {
@@ -2041,7 +2206,7 @@ function update(dt) {
     if (M.walledLanes) u.z = Math.max(LANE_WALL_END + 0.5, u.z);
     u.phase += dt * 9;
     u.mesh.geometry = poseFor(u.phase);
-    u.mesh.position.set(u.x, 0, u.z);
+    u.mesh.position.set(u.x, M.crewY, u.z);
     u.cd -= dt;
     if (u.cd <= 0 && M.shooting) { u.cd += fireInterval(); shoot(u); }
   }
@@ -2050,15 +2215,18 @@ function update(dt) {
   for (let i = enemies.length - 1; i >= 0; i--) {
     const e = enemies[i];
     const pz = e.z;
-    e.z += (scroll + M.march + e.walk) * dt;
-    if (e.z > -22 && n) e.x += Math.max(-1, Math.min(1, G.crowdX - e.x)) * e.steer * dt;
-    const ex = M.walledLanes && e.z < LANE_WALL_END ? LANE_EDGE - LANE_WALL_T - e.r : HALF_W - 0.35;  // walled middle lane
-    e.x = Math.max(-ex, Math.min(ex, e.x));
-    if (M.cover) holdBehindCover(e, pz);
+    if (e.ride) { e.x = G.crowdX + e.ride.dx; e.z = G.crowdZ + e.ride.dz; }  // a climber riding the Convoy truck
+    else {
+      e.z += (scroll + M.march + e.walk) * dt;
+      if (e.z > -22 && n) e.x += Math.max(-1, Math.min(1, G.crowdX - e.x)) * e.steer * dt;
+      const ex = M.walledLanes && e.z < LANE_WALL_END ? LANE_EDGE - LANE_WALL_T - e.r : HALF_W - 0.35;  // walled middle lane
+      e.x = Math.max(-ex, Math.min(ex, e.x));
+      if (M.cover) holdBehindCover(e, pz);
+    }
     e.phase += dt * (7 + e.walk * 3);
     e.hitT = Math.max(0, e.hitT - dt);
     e.mesh.geometry = poseFor(e.phase, e.boss ? 'boss' : 'enemy');
-    e.mesh.position.set(e.x, 0, e.z);
+    e.mesh.position.set(e.x, e.ride ? M.crewY : 0, e.z);
     e.mesh.scale.setScalar(e.scale * (1 + e.hitT * 2.5));
     if (e.boss) bossSlam(e, dt);
     if (e.shield) {
@@ -2073,7 +2241,7 @@ function update(dt) {
       e.bar.fg.scale.x = w * Math.max(0, e.hp / e.maxHp);
     }
     const reach = e.r + 0.18;
-    for (let j = units.length - 1; j >= 0; j--) {
+    if (M.crewContact) for (let j = units.length - 1; j >= 0; j--) {
       const u = units[j], dx = u.x - e.x, dz = u.z - e.z;
       if (dx * dx + dz * dz < reach * reach) {
         killUnit(u);
@@ -2273,7 +2441,7 @@ function animate(dt) {
   // crowd label + camera
   if (units && units.length && mode().crowdTag) {
     crowdSprite.visible = true;
-    crowdSprite.position.set(G.crowdX, 2.3, G.crowdZ - 0.2);
+    crowdSprite.position.set(G.crowdX, 2.3 + mode().crewY, G.crowdZ - 0.2);
     if (crowdSprite.userData.n !== crewCount()) { crowdSprite.userData.n = crewCount(); drawCrowdLabel(crewCount()); }
   } else crowdSprite.visible = false;
   const cx = G ? G.crowdX * 0.35 : 0;
